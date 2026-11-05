@@ -109,3 +109,31 @@ export async function getProducts(
         }),
     );
 }
+
+interface ImageRow extends RowDataPacket {
+    image: string | null;
+}
+
+// Image paths relative to OpenCart's image/ folder: the main image first,
+// then the additional images. Empty paths and duplicates are skipped.
+export async function getProductImages(
+    connection: Connection,
+    id: number,
+): Promise<string[]> {
+    const { dbPrefix } = getSettings();
+
+    const [main] = await connection.execute<ImageRow[]>(
+        `SELECT image FROM \`${dbPrefix}product\` WHERE product_id = ?`,
+        [id],
+    );
+    const [additional] = await connection.execute<ImageRow[]>(
+        `SELECT image FROM \`${dbPrefix}product_image\` WHERE product_id = ? ORDER BY sort_order, product_image_id`,
+        [id],
+    );
+
+    const paths = [...main, ...additional]
+        .map((row) => row.image?.trim() ?? "")
+        .filter((path) => path !== "");
+
+    return [...new Set(paths)];
+}

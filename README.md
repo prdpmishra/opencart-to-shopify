@@ -2,7 +2,7 @@
 
 Migrates products from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details: title, description, handle, price and SKU. Products are created as drafts. Images, inventory, variants and categories are not migrated yet.
+For now it migrates one product at a time with its basic details and images: title, description, handle, price, SKU, the main image and the additional images. Products are created as drafts. Inventory, variants and categories are not migrated yet.
 
 ## Requirements
 
@@ -26,6 +26,7 @@ DB_PASSWORD=
 DB_NAME=opencart
 DB_PREFIX=oc_
 LANGUAGE_ID=1
+OPENCART_IMAGE_DIR=C:\xampp\htdocs\opencart\image
 
 # Shopify app
 SHOPIFY_SHOP=my-store
@@ -40,6 +41,7 @@ SHOPIFY_API_VERSION=2026-10
 | `DB_PASSWORD` | Yes | Can be empty |
 | `DB_PREFIX` | No | Table prefix, e.g. `oc_`. Defaults to none. |
 | `LANGUAGE_ID` | No | OpenCart language for product names, descriptions and SEO keywords. Defaults to `1`. |
+| `OPENCART_IMAGE_DIR` | Yes, for `migrate` | OpenCart's `image` folder on this computer |
 | `SHOPIFY_SHOP` | Yes | `my-store` or `my-store.myshopify.com` |
 | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | Yes | From the Shopify app's settings |
 | `SHOPIFY_API_VERSION` | Yes | Admin API version, e.g. `2026-10` |
@@ -61,9 +63,12 @@ npm run typecheck                # type-check without running
    - **Handle:** the product's SEO keyword (store 0), normalised to lowercase letters, numbers and hyphens. Falls back to the product name, then `product-<id>`. Any change or fallback is logged.
    - **SKU:** the OpenCart SKU, or the model if the SKU is empty.
    - **Price:** unchanged, rounded to 2 decimals.
-4. With `--dry-run`, prints the converted product and stops. Shopify is not called and nothing is saved.
-5. Creates the product with one `productSet` call.
-6. Saves the OpenCart → Shopify ID mapping in `migration.sqlite`, then prints the admin link.
+4. Finds the product's images in `OPENCART_IMAGE_DIR`: the main image first, then the additional images by sort order. Missing files are skipped with a warning.
+5. With `--dry-run`, prints the converted product and the images it found, then stops. Shopify is not called and nothing is uploaded or saved.
+6. Uploads each image to Shopify (staged upload). A failed upload is skipped with a warning.
+7. Creates the product with its images in one `productSet` call.
+8. Saves the OpenCart → Shopify ID mapping in `migration.sqlite`, then prints the admin link.
+9. Waits up to a minute for Shopify to process the images and prints each one's status (`READY` or `FAILED`).
 
 `migration.sqlite` records which products have been migrated, so don't delete it. It is gitignored.
 

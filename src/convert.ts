@@ -12,6 +12,7 @@ export interface ProductSetInput {
         price: string;
         sku?: string;
     }[];
+    files?: { originalSource: string; alt: string; contentType: "IMAGE" }[];
 }
 
 export function toProductSetInput(product: FullProduct): ProductSetInput {
