@@ -23,15 +23,75 @@ export async function connect(): Promise<Connection> {
     });
 }
 
-export async function getProducts(
-    connection: Connection,
-    limit = 20,
-): Promise<Product[]> {
+interface FullProductRow extends RowDataPacket {
+    product_id: number;
+    price: string;
+    sku: string;
+    model: string;
+    name: string | null;
+    description: string | null;
+    keyword: string | null;
+}
+
+export interface FullProduct {
+    id: number;
+    price: string;
+    sku: string;
+    model: string;
+    name: string;
+    description: string;
+    /** SEO URL keyword for store 0 and LANGUAGE_ID, or null if none is set. */
+    seoKeyword: string | null;
+}
+
+function getSettings() {
     const dbPrefix = process.env.DB_PREFIX || "";
     const languageId = Number(process.env.LANGUAGE_ID || 1);
 
     if (!Number.isInteger(languageId))
         throw new Error("LANGUAGE_ID must be a whole number.");
+
+    return { dbPrefix, languageId };
+}
+
+export async function getProduct(
+    connection: Connection,
+    id: number,
+): Promise<FullProduct> {
+    const { dbPrefix, languageId } = getSettings();
+
+    // OpenCart 3.0 keeps SEO keywords in seo_url, keyed by query = 'product_id=<id>'.
+    const [results] = await connection.execute<FullProductRow[]>(
+        `SELECT p.product_id, p.price, p.sku, p.model, pd.name, pd.description, su.keyword
+        FROM \`${dbPrefix}product\` p
+        LEFT JOIN \`${dbPrefix}product_description\` pd
+            ON pd.product_id = p.product_id AND pd.language_id = ?
+        LEFT JOIN \`${dbPrefix}seo_url\` su
+            ON su.query = CONCAT('product_id=', p.product_id) AND su.store_id = 0 AND su.language_id = ?
+        WHERE p.product_id = ?`,
+        [languageId, languageId, id],
+    );
+
+    const row = results[0];
+    if (!row) throw new Error(`OpenCart product ${id} not found.`);
+
+    return {
+        id: row.product_id,
+        price: row.price,
+        sku: row.sku,
+        model: row.model,
+        name: decode(row.name ?? ""),
+        description: decode(row.description ?? ""),
+        seoKeyword: row.keyword || null,
+    };
+}
+
+export async function getProducts(
+    connection: Connection,
+    limit = 20,
+): Promise<Product[]> {
+    const { dbPrefix, languageId } = getSettings();
+
     if (!Number.isInteger(limit) || limit < 1)
         throw new Error("limit must be a positive whole number.");
 

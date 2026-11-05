@@ -31,7 +31,7 @@ LANGUAGE_ID=1
 SHOPIFY_SHOP=my-store
 SHOPIFY_CLIENT_ID=
 SHOPIFY_CLIENT_SECRET=
-SHOPIFY_API_VERSION=2025-10
+SHOPIFY_API_VERSION=2026-10
 ```
 
 | Variable | Required | Notes |
@@ -42,7 +42,7 @@ SHOPIFY_API_VERSION=2025-10
 | `LANGUAGE_ID` | No | OpenCart language for product names. Defaults to `1`. |
 | `SHOPIFY_SHOP` | Yes | `my-store` or `my-store.myshopify.com` |
 | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | Yes | From the Shopify app's settings |
-| `SHOPIFY_API_VERSION` | Yes | Admin API version, e.g. `2025-10` |
+| `SHOPIFY_API_VERSION` | Yes | Admin API version, e.g. `2026-10` |
 
 ## Usage
 
