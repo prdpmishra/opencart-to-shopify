@@ -1,5 +1,52 @@
 import type { FullProduct } from "./opencart.ts";
 
+// The parts of Shopify's ProductSetInput that we fill in.
+export interface ProductSetInput {
+    title: string;
+    descriptionHtml: string;
+    handle: string;
+    status: "DRAFT";
+    productOptions: { name: string; values: { name: string }[] }[];
+    variants: {
+        optionValues: { optionName: string; name: string }[];
+        price: string;
+        sku?: string;
+    }[];
+}
+
+export function toProductSetInput(product: FullProduct): ProductSetInput {
+    const label = `Product ${product.id}`;
+
+    const price = Number(product.price);
+    if (!Number.isFinite(price))
+        throw new Error(`${label}: invalid price "${product.price}"`);
+
+    // Products without options still need one: Shopify's default "Title" option.
+    const variant: ProductSetInput["variants"][number] = {
+        optionValues: [{ optionName: "Title", name: "Default Title" }],
+        price: price.toFixed(2),
+    };
+
+    const sku = product.sku.trim() || product.model.trim();
+    if (sku) variant.sku = sku;
+    if (!product.sku.trim()) {
+        console.log(
+            sku
+                ? `${label}: no SKU, using model "${sku}"`
+                : `${label}: no SKU or model, variant will have no SKU`,
+        );
+    }
+
+    return {
+        title: product.name,
+        descriptionHtml: product.description,
+        handle: buildHandle(product),
+        status: "DRAFT",
+        productOptions: [{ name: "Title", values: [{ name: "Default Title" }] }],
+        variants: [variant],
+    };
+}
+
 // Shopify handles use lowercase letters, numbers and hyphens.
 export function toHandle(text: string): string {
     return text
