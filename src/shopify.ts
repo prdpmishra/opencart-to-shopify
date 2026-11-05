@@ -1,3 +1,5 @@
+import { requireEnv } from "./env.ts";
+
 interface TokenResponse {
     access_token: string;
     expires_in: number;
@@ -8,29 +10,11 @@ interface GraphQLResponse<T> {
     errors?: { message: string }[];
 }
 
-interface ProductsQuery {
-    products: {
-        edges: { node: { id: string; title: string; handle: string } }[];
-    };
-}
-
-function requireEnv(name: string): string {
-    const value = process.env[name];
-    if (value === undefined || value === "")
-        throw new Error(`Missing environment variable: ${name}`);
-
-    return value;
-}
-
-const SHOP = requireEnv("SHOPIFY_SHOP");
-const CLIENT_ID = requireEnv("SHOPIFY_CLIENT_ID");
-const CLIENT_SECRET = requireEnv("SHOPIFY_CLIENT_SECRET");
-const API_VERSION = requireEnv("SHOPIFY_API_VERSION");
-
 // Accept either "my-store" or "my-store.myshopify.com".
-const SHOP_DOMAIN = SHOP.endsWith(".myshopify.com")
-    ? SHOP
-    : `${SHOP}.myshopify.com`;
+function shopDomain(): string {
+    const shop = requireEnv("SHOPIFY_SHOP");
+    return shop.endsWith(".myshopify.com") ? shop : `${shop}.myshopify.com`;
+}
 
 let token: string | null = null;
 let tokenExpiresAt = 0;
@@ -39,14 +23,14 @@ async function getToken(): Promise<string> {
     if (token && Date.now() < tokenExpiresAt - 60_000) return token;
 
     const response = await fetch(
-        `https://${SHOP_DOMAIN}/admin/oauth/access_token`,
+        `https://${shopDomain()}/admin/oauth/access_token`,
         {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
                 grant_type: "client_credentials",
-                client_id: CLIENT_ID,
-                client_secret: CLIENT_SECRET,
+                client_id: requireEnv("SHOPIFY_CLIENT_ID"),
+                client_secret: requireEnv("SHOPIFY_CLIENT_SECRET"),
             }),
         },
     );
@@ -63,12 +47,13 @@ async function getToken(): Promise<string> {
     return access_token;
 }
 
-async function graphql<T>(
+export async function graphql<T>(
     query: string,
     variables: Record<string, unknown> = {},
 ): Promise<T> {
+    const apiVersion = requireEnv("SHOPIFY_API_VERSION");
     const response = await fetch(
-        `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/graphql.json`,
+        `https://${shopDomain()}/admin/api/${apiVersion}/graphql.json`,
         {
             method: "POST",
             headers: {
@@ -93,15 +78,3 @@ async function graphql<T>(
 
     return data;
 }
-
-async function main() {
-    const query =
-        "{ products(first: 3) { edges { node { id title handle } } } }";
-    const data = await graphql<ProductsQuery>(query);
-    console.log("Products:", JSON.stringify(data, null, 2));
-}
-
-main().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-});
