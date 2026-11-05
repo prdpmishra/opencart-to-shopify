@@ -1,4 +1,5 @@
 import { requireEnv } from "./env.ts";
+import type { ProductSetInput } from "./convert.ts";
 
 interface TokenResponse {
     access_token: string;
@@ -77,4 +78,79 @@ export async function graphql<T>(
     if (data === undefined) throw new Error("GraphQL response had no data");
 
     return data;
+}
+
+interface ProductSetResult {
+    productSet: {
+        product: {
+            id: string;
+            handle: string;
+            variants: { nodes: { price: string; sku: string | null }[] };
+        } | null;
+        userErrors: { field: string[] | null; message: string; code: string | null }[];
+    };
+}
+
+export interface CreatedProduct {
+    id: string;
+    handle: string;
+    price: string;
+    sku: string | null;
+}
+
+const PRODUCT_SET = `
+    mutation CreateProduct($input: ProductSetInput!) {
+        productSet(synchronous: true, input: $input) {
+            product {
+                id
+                handle
+                variants(first: 1) {
+                    nodes {
+                        price
+                        sku
+                    }
+                }
+            }
+            userErrors {
+                field
+                message
+                code
+            }
+        }
+    }
+`;
+
+export async function createProduct(
+    input: ProductSetInput,
+): Promise<CreatedProduct> {
+    const { productSet } = await graphql<ProductSetResult>(PRODUCT_SET, {
+        input,
+    });
+
+    // Validation problems come back as userErrors, not as a failed request.
+    if (productSet.userErrors.length > 0) {
+        const messages = productSet.userErrors.map(
+            (e) => `${e.field?.join(".") ?? "(no field)"}: ${e.message}`,
+        );
+        throw new Error(`Shopify rejected the product:\n  ${messages.join("\n  ")}`);
+    }
+
+    const product = productSet.product;
+    const variant = product?.variants.nodes[0];
+    if (!product || !variant)
+        throw new Error("Shopify returned no product and no errors.");
+
+    return {
+        id: product.id,
+        handle: product.handle,
+        price: variant.price,
+        sku: variant.sku,
+    };
+}
+
+// "gid://shopify/Product/123" → the product's page in Shopify admin.
+export function adminProductUrl(productId: string): string {
+    const store = requireEnv("SHOPIFY_SHOP").replace(/\.myshopify\.com$/, "");
+    const numericId = productId.split("/").pop();
+    return `https://admin.shopify.com/store/${store}/products/${numericId}`;
 }

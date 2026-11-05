@@ -2,7 +2,8 @@ import { parseArgs } from "node:util";
 import type { Connection } from "mysql2/promise";
 import { connect, getProduct } from "./opencart.ts";
 import { toProductSetInput } from "./convert.ts";
-import { findMapping } from "./mapping.ts";
+import { findMapping, saveMapping } from "./mapping.ts";
+import { adminProductUrl, createProduct } from "./shopify.ts";
 
 const USAGE = "Usage: npm run migrate -- <opencart-product-id> [--dry-run]";
 
@@ -49,7 +50,29 @@ async function main() {
             return;
         }
 
-        console.log("Creating the product in Shopify is not implemented yet.");
+        const created = await createProduct(input);
+
+        if (created.handle !== input.handle)
+            console.log(
+                `Product ${id}: handle "${input.handle}" was taken, Shopify used "${created.handle}"`,
+            );
+
+        // Only save the mapping once the product fully exists in Shopify.
+        try {
+            saveMapping("product", id, created.id);
+        } catch (error) {
+            throw new Error(
+                `Product was created in Shopify as ${created.id}, but saving the mapping failed ` +
+                    `(${error instanceof Error ? error.message : error}). ` +
+                    "Add the mapping by hand or delete the Shopify product before running again.",
+            );
+        }
+
+        console.log(
+            `Created product ${id} in Shopify as a draft: ${created.id}\n` +
+                `  handle: ${created.handle}, price: ${created.price}, sku: ${created.sku ?? "(none)"}\n` +
+                `  ${adminProductUrl(created.id)}`,
+        );
     } catch (error) {
         console.error(
             "Something went wrong:",
