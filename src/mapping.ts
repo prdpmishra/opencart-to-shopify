@@ -11,7 +11,7 @@ export interface Mapping {
 
 let db: DatabaseSync | undefined;
 
-// Opened on first use, so a dry run that never looks up a mapping doesn't create the file.
+// Opened on first use, so just importing this module doesn't create the file.
 function getDb(): DatabaseSync {
     if (db) return db;
 
