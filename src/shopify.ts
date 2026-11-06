@@ -166,6 +166,8 @@ export interface ShopifyProduct {
 
 export interface ShopifyVariant {
     id: string;
+    /** e.g. [{ name: "Size", value: "Small" }], or [{ name: "Title", value: "Default Title" }] */
+    selectedOptions: { name: string; value: string }[];
     price: string;
     sku: string | null;
     inventoryPolicy: string;
@@ -183,8 +185,10 @@ interface ProductQueryResult {
         handle: string;
         status: string;
         variants: {
+            pageInfo: { hasNextPage: boolean };
             nodes: {
                 id: string;
+                selectedOptions: { name: string; value: string }[];
                 price: string;
                 sku: string | null;
                 inventoryPolicy: string;
@@ -206,9 +210,16 @@ const PRODUCT_QUERY = `
             descriptionHtml
             handle
             status
-            variants(first: 2) {
+            variants(first: 250) {
+                pageInfo {
+                    hasNextPage
+                }
                 nodes {
                     id
+                    selectedOptions {
+                        name
+                        value
+                    }
                     price
                     sku
                     inventoryPolicy
@@ -229,7 +240,6 @@ const PRODUCT_QUERY = `
 `;
 
 // Returns null if the product doesn't exist (e.g. it was deleted in Shopify).
-// Fetches up to 2 variants: enough to tell whether there is more than one.
 export async function getShopifyProduct(
     productId: string,
     locationId: string,
@@ -240,10 +250,16 @@ export async function getShopifyProduct(
     });
     if (!product) return null;
 
+    // 250 is the most one request returns. Comparing a partial list would make
+    // the update delete the variants we didn't see, so stop instead.
+    if (product.variants.pageInfo.hasNextPage)
+        throw new Error(`Shopify product ${productId} has more than 250 variants, which isn't supported.`);
+
     return {
         ...product,
         variants: product.variants.nodes.map((v) => ({
             id: v.id,
+            selectedOptions: v.selectedOptions,
             price: v.price,
             sku: v.sku,
             inventoryPolicy: v.inventoryPolicy,

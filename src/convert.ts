@@ -1,4 +1,4 @@
-import type { FullProduct } from "./opencart.ts";
+import type { FullProduct, OptionValue, ProductOption } from "./opencart.ts";
 
 // The parts of Shopify's ProductSetInput that we fill in.
 // handle and status are left out when updating, so Shopify keeps its values.
@@ -21,48 +21,103 @@ export interface ProductSetInput {
     files?: { originalSource: string; alt: string; contentType: "IMAGE" }[];
 }
 
+// Shopify allows at most 3 options per product.
+const MAX_OPTIONS = 3;
+
+// options: OpenCart's select/radio options. Each combination of their values
+// becomes a Shopify variant. Without options the product gets one variant.
 export function toProductSetInput(
     product: FullProduct,
     locationId: string,
+    options: ProductOption[],
 ): ProductSetInput {
     const label = `Product ${product.id}`;
 
-    const price = Number(product.price);
-    if (!Number.isFinite(price))
+    const basePrice = Number(product.price);
+    if (!Number.isFinite(basePrice))
         throw new Error(`${label}: invalid price "${product.price}"`);
 
-    // Products without options still need one: Shopify's default "Title" option.
-    const variant: ProductSetInput["variants"][number] = {
-        optionValues: [{ optionName: "Title", name: "Default Title" }],
-        price: price.toFixed(2),
-        // OpenCart's "Subtract Stock" is Shopify's "Track quantity".
-        inventoryItem: { tracked: product.subtractStock },
-        inventoryPolicy: product.allowOutOfStockCheckout ? "CONTINUE" : "DENY",
-    };
+    if (options.length > MAX_OPTIONS)
+        throw new Error(
+            `${label}: has ${options.length} select/radio options, but Shopify allows at most ${MAX_OPTIONS}.`,
+        );
+    for (const option of options) {
+        const names = option.values.map((v) => v.name);
+        if (new Set(names).size !== names.length)
+            throw new Error(`${label}: option "${option.name}" has two values with the same name.`);
+    }
 
-    // Shopify ignores quantities of untracked items, so only send them when tracked.
-    if (product.subtractStock)
-        variant.inventoryQuantities = [
-            { locationId, name: "available", quantity: product.quantity },
-        ];
-
-    const sku = product.sku.trim() || product.model.trim();
-    if (sku) variant.sku = sku;
+    const baseSku = product.sku.trim() || product.model.trim();
     if (!product.sku.trim()) {
         console.log(
-            sku
-                ? `${label}: no SKU, using model "${sku}"`
-                : `${label}: no SKU or model, variant will have no SKU`,
+            baseSku
+                ? `${label}: no SKU, using model "${baseSku}"`
+                : `${label}: no SKU or model, variants will have no SKU`,
         );
     }
+
+    // Every combination of option values, e.g. [Red, Small], [Red, Large], ...
+    // Without options this is a single empty combination.
+    let combinations: { option: string; value: OptionValue }[][] = [[]];
+    for (const option of options)
+        combinations = combinations.flatMap((combination) =>
+            option.values.map((value) => [...combination, { option: option.name, value }]),
+        );
+
+    const variants = combinations.map((combination, i): ProductSetInput["variants"][number] => {
+        // Products without options use Shopify's default "Title" option.
+        const optionValues =
+            combination.length > 0
+                ? combination.map((c) => ({ optionName: c.option, name: c.value.name }))
+                : [{ optionName: "Title", name: "Default Title" }];
+
+        // OpenCart adds each chosen value's price modifier to the product price.
+        const price = combination.reduce((sum, c) => sum + c.value.priceModifier, basePrice);
+        if (price < 0)
+            throw new Error(`${label}: variant ${optionValues.map((o) => o.name).join(" / ")} has a negative price.`);
+
+        // OpenCart checks every quantity it tracks (the product's and each value's),
+        // so the variant can't sell more than the lowest of them.
+        const trackedQuantities = [
+            ...(product.subtractStock ? [product.quantity] : []),
+            ...combination.filter((c) => c.value.subtractStock).map((c) => c.value.quantity),
+        ];
+        const tracked = trackedQuantities.length > 0;
+
+        const variant: ProductSetInput["variants"][number] = {
+            optionValues,
+            price: price.toFixed(2),
+            // OpenCart's "Subtract Stock" is Shopify's "Track quantity".
+            inventoryItem: { tracked },
+            inventoryPolicy: product.allowOutOfStockCheckout ? "CONTINUE" : "DENY",
+        };
+
+        // Shopify ignores quantities of untracked items, so only send them when tracked.
+        if (tracked)
+            variant.inventoryQuantities = [
+                { locationId, name: "available", quantity: Math.min(...trackedQuantities) },
+            ];
+
+        // Each variant gets its own SKU: the product's SKU plus its option values.
+        if (baseSku) {
+            const suffix = toHandle(combination.map((c) => c.value.name).join(" "));
+            variant.sku =
+                combination.length === 0 ? baseSku : `${baseSku}-${suffix || i + 1}`;
+        }
+
+        return variant;
+    });
 
     return {
         title: product.name,
         descriptionHtml: cleanDescription(product.description),
         handle: buildHandle(product),
         status: "DRAFT",
-        productOptions: [{ name: "Title", values: [{ name: "Default Title" }] }],
-        variants: [variant],
+        productOptions:
+            options.length > 0
+                ? options.map((o) => ({ name: o.name, values: o.values.map((v) => ({ name: v.name })) }))
+                : [{ name: "Title", values: [{ name: "Default Title" }] }],
+        variants,
     };
 }
 

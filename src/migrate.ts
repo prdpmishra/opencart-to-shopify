@@ -3,7 +3,13 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { Connection } from "mysql2/promise";
 import { requireEnv } from "./env.ts";
-import { connect, getProduct, getProductImages, type FullProduct } from "./opencart.ts";
+import {
+    connect,
+    getProduct,
+    getProductImages,
+    getProductOptions,
+    type FullProduct,
+} from "./opencart.ts";
 import { toProductSetInput, type ProductSetInput } from "./convert.ts";
 import { rewriteDescriptionImages } from "./description.ts";
 import { findMapping, saveMapping } from "./mapping.ts";
@@ -12,6 +18,7 @@ import {
     getShopifyProduct,
     saveProduct,
     setAvailableQuantity,
+    type ShopifyVariant,
     uploadImage,
     waitForImages,
 } from "./shopify.ts";
@@ -68,7 +75,17 @@ async function main() {
         connection = await connect();
         const locationId = requireEnv("SHOPIFY_LOCATION_ID");
         const product = await getProduct(connection, id);
-        const input = toProductSetInput(product, locationId);
+        const { options, skipped } = await getProductOptions(connection, id);
+
+        // Customer inputs (checkbox, text, date, file, ...) have no Shopify equivalent.
+        for (const option of skipped)
+            console.warn(
+                `Warning: product ${id}: option "${option.name}" (${option.type}) is not migrated, ` +
+                    "Shopify has no standard equivalent." +
+                    (option.required ? " It is required in OpenCart, but Shopify customers won't be asked for it." : ""),
+            );
+
+        const input = toProductSetInput(product, locationId, options);
 
         // Before comparing or sending, so the description has Shopify image URLs.
         input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
@@ -150,7 +167,7 @@ async function createProduct(
 
     console.log(
         `Created product ${id} in Shopify as a draft: ${created.id}\n` +
-            `  handle: ${created.handle}, price: ${created.price}, sku: ${created.sku ?? "(none)"}\n` +
+            `  handle: ${created.handle}, ${input.variants.length} variant(s)\n` +
             `  ${adminProductUrl(created.id)}`,
     );
 
@@ -178,7 +195,16 @@ function sameHtml(a: string, b: string): boolean {
     return normalise(a) === normalise(b);
 }
 
-// Updates title, description, price, SKU and inventory from OpenCart.
+// Identifies a variant by its option values, e.g. "Color=Red|Size=Small".
+// Sorted, so the order of the options doesn't matter.
+function variantKey(options: { name: string; value: string }[]): string {
+    return options
+        .map((o) => `${o.name}=${o.value}`)
+        .sort()
+        .join("|");
+}
+
+// Updates title, description, variants and inventory from OpenCart.
 // Handle, status and images are left as they are in Shopify.
 async function updateProduct(
     id: number,
@@ -194,15 +220,6 @@ async function updateProduct(
                 "Delete its mapping row to migrate it again.",
         );
 
-    // Updating sends exactly one variant, so Shopify would delete any others.
-    const currentVariant = current.variants[0];
-    if (!currentVariant || current.variants.length > 1)
-        throw new Error(
-            `Shopify product ${shopifyId} doesn't have exactly one variant. ` +
-                "Updating would replace its variants, so it was not updated.",
-        );
-
-    const newVariant = input.variants[0]!;
     const changes: string[] = [];
     if (current.title !== input.title)
         changes.push(`title: "${current.title}" → "${input.title}"`);
@@ -210,21 +227,60 @@ async function updateProduct(
         changes.push(
             `description: changed (${current.descriptionHtml.length} → ${input.descriptionHtml.length} characters)`,
         );
-    if (currentVariant.price !== newVariant.price)
-        changes.push(`price: ${currentVariant.price} → ${newVariant.price}`);
-    if ((currentVariant.sku ?? "") !== (newVariant.sku ?? ""))
-        changes.push(`sku: "${currentVariant.sku ?? ""}" → "${newVariant.sku ?? ""}"`);
-    if (currentVariant.tracked !== newVariant.inventoryItem.tracked)
-        changes.push(`track quantity: ${currentVariant.tracked} → ${newVariant.inventoryItem.tracked}`);
-    if (currentVariant.inventoryPolicy !== newVariant.inventoryPolicy)
-        changes.push(`out-of-stock policy: ${currentVariant.inventoryPolicy} → ${newVariant.inventoryPolicy}`);
-    const productChanged = changes.length > 0;
+    let productChanged = changes.length > 0;
 
-    // The quantity is only set for tracked items (see toProductSetInput).
-    const quantity = newVariant.inventoryQuantities?.[0]?.quantity;
-    const quantityChanged = quantity !== undefined && currentVariant.available !== quantity;
-    if (quantityChanged)
-        changes.push(`available at location: ${currentVariant.available ?? "not stocked"} → ${quantity}`);
+    // Match each OpenCart variant to the Shopify variant with the same option values.
+    // Matched variants keep their Shopify ID; unmatched ones are created or deleted.
+    const currentByKey = new Map(current.variants.map((v) => [variantKey(v.selectedOptions), v]));
+    const variants: ProductSetInput["variants"] = [];
+    const quantityUpdates: { variant: ShopifyVariant; quantity: number }[] = [];
+
+    for (const newVariant of input.variants) {
+        const name = newVariant.optionValues.map((o) => o.name).join(" / ");
+        const key = variantKey(newVariant.optionValues.map((o) => ({ name: o.optionName, value: o.name })));
+        const currentVariant = currentByKey.get(key);
+        currentByKey.delete(key);
+
+        if (!currentVariant) {
+            // A new variant gets its quantity from productSet, like when creating.
+            const quantity = newVariant.inventoryQuantities?.[0]?.quantity;
+            changes.push(`variant "${name}": new (price ${newVariant.price}, available ${quantity ?? "not tracked"})`);
+            variants.push(newVariant);
+            productChanged = true;
+            continue;
+        }
+
+        // The quantity is left out of productSet and set below, with compare-and-swap.
+        const { inventoryQuantities, ...variant } = newVariant;
+        variants.push({ ...variant, id: currentVariant.id });
+
+        const variantChanges: string[] = [];
+        if (currentVariant.price !== newVariant.price)
+            variantChanges.push(`price ${currentVariant.price} → ${newVariant.price}`);
+        if ((currentVariant.sku ?? "") !== (newVariant.sku ?? ""))
+            variantChanges.push(`sku "${currentVariant.sku ?? ""}" → "${newVariant.sku ?? ""}"`);
+        if (currentVariant.tracked !== newVariant.inventoryItem.tracked)
+            variantChanges.push(`track quantity ${currentVariant.tracked} → ${newVariant.inventoryItem.tracked}`);
+        if (currentVariant.inventoryPolicy !== newVariant.inventoryPolicy)
+            variantChanges.push(`out-of-stock policy ${currentVariant.inventoryPolicy} → ${newVariant.inventoryPolicy}`);
+        if (variantChanges.length > 0) productChanged = true;
+
+        // The quantity is only set for tracked items (see toProductSetInput).
+        const quantity = inventoryQuantities?.[0]?.quantity;
+        if (quantity !== undefined && currentVariant.available !== quantity) {
+            variantChanges.push(`available ${currentVariant.available ?? "not stocked"} → ${quantity}`);
+            quantityUpdates.push({ variant: currentVariant, quantity });
+        }
+
+        if (variantChanges.length > 0)
+            changes.push(`variant "${name}": ${variantChanges.join(", ")}`);
+    }
+
+    // Shopify variants that no longer exist in OpenCart. productSet deletes them.
+    for (const removed of currentByKey.values()) {
+        changes.push(`variant "${removed.selectedOptions.map((o) => o.value).join(" / ")}": deleted`);
+        productChanged = true;
+    }
 
     if (changes.length === 0) {
         console.log(`Product ${id} is already up to date in Shopify (${shopifyId}). Nothing to do.`);
@@ -238,27 +294,20 @@ async function updateProduct(
         return;
     }
 
-    if (productChanged) {
-        // No handle, status or files, so Shopify keeps them. The variant ID makes
-        // Shopify update the existing variant instead of replacing it. The quantity
-        // is left out here and set below, with Shopify's compare-and-swap.
-        const { inventoryQuantities, ...variant } = newVariant;
-        const updateInput: ProductSetInput = {
-            title: input.title,
-            descriptionHtml: input.descriptionHtml,
-            productOptions: input.productOptions,
-            variants: [{ ...variant, id: currentVariant.id }],
-        };
-        await saveProduct(updateInput, shopifyId);
-    }
-
-    if (quantityChanged)
-        await setAvailableQuantity(
-            currentVariant.inventoryItemId,
-            locationId,
-            quantity,
-            currentVariant.available,
+    if (productChanged)
+        // No handle, status or files, so Shopify keeps them.
+        await saveProduct(
+            {
+                title: input.title,
+                descriptionHtml: input.descriptionHtml,
+                productOptions: input.productOptions,
+                variants,
+            },
+            shopifyId,
         );
+
+    for (const { variant, quantity } of quantityUpdates)
+        await setAvailableQuantity(variant.inventoryItemId, locationId, quantity, variant.available);
 
     console.log(`Updated product ${id} in Shopify: ${shopifyId}\n  ${adminProductUrl(shopifyId)}`);
 }

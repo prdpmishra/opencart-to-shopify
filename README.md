@@ -2,7 +2,7 @@
 
 Migrates products from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details, images and stock: title, description, handle, price, SKU, the main image, the additional images and the quantity. Products are created as drafts. Variants and categories are not migrated yet.
+For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, and quantities. Products are created as drafts. Categories are not migrated yet.
 
 ## Requirements
 
@@ -73,9 +73,10 @@ npm run typecheck                # type-check without running
 2. Reads the product from OpenCart.
 3. Converts it to Shopify's format:
    - **Handle:** the product's SEO keyword (store 0), normalised to lowercase letters, numbers and hyphens. Falls back to the product name, then `product-<id>`. Any change or fallback is logged.
-   - **SKU:** the OpenCart SKU, or the model if the SKU is empty.
-   - **Price:** unchanged, rounded to 2 decimals.
-   - **Stock:** OpenCart's "Subtract Stock" becomes Shopify's "Track quantity". For tracked products, the quantity becomes the available quantity at `SHOPIFY_LOCATION_ID`. OpenCart's "allow checkout when out of stock" store setting becomes "Continue selling when out of stock". OpenCart's stock status text ("2-3 Days", "Pre-Order") and minimum order quantity have no Shopify equivalent and are not migrated.
+   - **SKU:** the OpenCart SKU, or the model if the SKU is empty. Variants get the SKU plus their option values, e.g. `Product 8-small`.
+   - **Price:** unchanged, rounded to 2 decimals. A variant's price is the product price plus (or minus) its option values' price modifiers.
+   - **Variants:** select and radio options (up to 3, Shopify's limit) become Shopify options, and every combination of their values becomes a variant. Products without them get Shopify's single `Default Title` variant. Other option types (checkbox, text, textarea, date, time, date & time, file) are customer inputs with no standard Shopify equivalent: they are skipped with a warning, which also says when the option was required.
+   - **Stock:** OpenCart's "Subtract Stock" becomes Shopify's "Track quantity". For tracked products, the quantity becomes the available quantity at `SHOPIFY_LOCATION_ID`. OpenCart tracks stock per product and per option value, not per combination, so a variant gets the lowest quantity that OpenCart tracks for it (the product's and each chosen value's). OpenCart's "allow checkout when out of stock" store setting becomes "Continue selling when out of stock". OpenCart's stock status text ("2-3 Days", "Pre-Order") and minimum order quantity have no Shopify equivalent and are not migrated.
    - **Description clean-up:** the HTML is tidied to match what Shopify's editor produces: HTML comments and `class` attributes are removed, `<font>` tags are removed (their text is kept, so the theme's font is used), `<b>`/`<i>` become `<strong>`/`<em>`, and line breaks and tabs are collapsed. The visible text doesn't change.
    - **Images inside the description:** each `<img src>` that points to OpenCart (`OPENCART_IMAGE_URL`, the same path without the domain, or a relative `image/…` / `catalog/…` path) is uploaded to Shopify Files and its `src` replaced with the Shopify CDN URL. Each image is uploaded once and remembered in `migration.sqlite`. Missing files and other websites' images keep their original URL. With `--dry-run`, nothing is uploaded.
 4. Finds the product's images in `OPENCART_IMAGE_DIR`: the main image first, then the additional images by sort order. Missing files are skipped with a warning.
@@ -87,15 +88,16 @@ npm run typecheck                # type-check without running
 
 ### Updating a migrated product (`--update`)
 
-OpenCart is the source of truth: the title, description, price, SKU and stock in Shopify are overwritten with OpenCart's values.
+OpenCart is the source of truth: the title, description, variants, prices, SKUs and stock in Shopify are overwritten with OpenCart's values.
 
 > **Note:** this includes the available quantity. That's right while OpenCart is the live shop, but once Shopify takes orders, `--update` would overwrite stock that Shopify has reduced.
 
-1. Fetches the mapped product from Shopify. Stops if it no longer exists, or if it doesn't have exactly one variant (an update would delete the others).
-2. Prints each difference as `field: old → new`. If nothing differs, it says the product is up to date and doesn't call Shopify. Whitespace between HTML tags is ignored when comparing descriptions, because Shopify reformats HTML when saving it.
-3. With `--dry-run`, stops after printing the differences.
-4. Updates the product with `productSet`, keeping the existing variant (same ID).
-5. Sets the available quantity with `inventorySetQuantities`, passing the quantity it just read as `changeFromQuantity`. If the stock changed in Shopify in the meantime (e.g. a sale), Shopify refuses instead of overwriting it. If the item isn't stocked at the location yet, it is activated there.
+1. Fetches the mapped product from Shopify, with all its variants. Stops if it no longer exists.
+2. Matches each variant to the Shopify variant with the same option values. Matched variants keep their Shopify ID. New combinations are created, and Shopify variants that no longer exist in OpenCart are deleted.
+3. Prints each difference, e.g. `variant "Medium": price 99.00 → 110.00`. If nothing differs, it says the product is up to date and doesn't call Shopify. Whitespace between HTML tags is ignored when comparing descriptions, because Shopify reformats HTML when saving it.
+4. With `--dry-run`, stops after printing the differences.
+5. Updates the product and its variants with `productSet`.
+6. Sets the available quantity of each changed existing variant with `inventorySetQuantities`, passing the quantity it just read as `changeFromQuantity`. If the stock changed in Shopify in the meantime (e.g. a sale), Shopify refuses instead of overwriting it. If the item isn't stocked at the location yet, it is activated there.
 
 The handle, status and gallery images are not changed, so product URLs stay the same and a product you have activated in Shopify stays active. Changes to the gallery images in OpenCart are not synced; images inside the description are.
 

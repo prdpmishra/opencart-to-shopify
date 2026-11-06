@@ -151,3 +151,95 @@ export async function getProductImages(
 
     return [...new Set(paths)];
 }
+
+export interface OptionValue {
+    name: string;
+    /** Added to the product price; negative for OpenCart's "-" prefix. */
+    priceModifier: number;
+    quantity: number;
+    /** OpenCart's "Subtract Stock" for this value. */
+    subtractStock: boolean;
+}
+
+export interface ProductOption {
+    name: string;
+    values: OptionValue[];
+}
+
+export interface SkippedOption {
+    name: string;
+    type: string;
+    required: boolean;
+}
+
+interface OptionRow extends RowDataPacket {
+    product_option_id: number;
+    name: string;
+    type: string;
+    required: number;
+}
+
+interface OptionValueRow extends RowDataPacket {
+    product_option_id: number;
+    name: string;
+    price: string;
+    price_prefix: string;
+    quantity: number;
+    subtract: number;
+}
+
+// Select and radio options (one choice each) can become Shopify variants.
+// Other types (checkbox, text, date, file, ...) are returned as skipped.
+export async function getProductOptions(
+    connection: Connection,
+    id: number,
+): Promise<{ options: ProductOption[]; skipped: SkippedOption[] }> {
+    const { dbPrefix, languageId } = getSettings();
+
+    const [optionRows] = await connection.execute<OptionRow[]>(
+        `SELECT po.product_option_id, od.name, o.type, po.required
+        FROM \`${dbPrefix}product_option\` po
+        JOIN \`${dbPrefix}option\` o ON o.option_id = po.option_id
+        LEFT JOIN \`${dbPrefix}option_description\` od
+            ON od.option_id = o.option_id AND od.language_id = ?
+        WHERE po.product_id = ?
+        ORDER BY o.sort_order, po.product_option_id`,
+        [languageId, id],
+    );
+
+    const [valueRows] = await connection.execute<OptionValueRow[]>(
+        `SELECT pov.product_option_id, ovd.name, pov.price, pov.price_prefix, pov.quantity, pov.subtract
+        FROM \`${dbPrefix}product_option_value\` pov
+        JOIN \`${dbPrefix}option_value\` ov ON ov.option_value_id = pov.option_value_id
+        LEFT JOIN \`${dbPrefix}option_value_description\` ovd
+            ON ovd.option_value_id = pov.option_value_id AND ovd.language_id = ?
+        WHERE pov.product_id = ?
+        ORDER BY ov.sort_order, pov.product_option_value_id`,
+        [languageId, id],
+    );
+
+    const options: ProductOption[] = [];
+    const skipped: SkippedOption[] = [];
+
+    for (const row of optionRows) {
+        const name = decode(row.name ?? "");
+        if (row.type !== "select" && row.type !== "radio") {
+            skipped.push({ name, type: row.type, required: row.required === 1 });
+            continue;
+        }
+
+        const values = valueRows
+            .filter((v) => v.product_option_id === row.product_option_id)
+            .map((v) => ({
+                name: decode(v.name ?? ""),
+                priceModifier: Number(v.price) * (v.price_prefix === "-" ? -1 : 1),
+                quantity: v.quantity,
+                subtractStock: v.subtract === 1,
+            }));
+
+        // An option without values offers no choice, so there is nothing to migrate.
+        if (values.length > 0) options.push({ name, values });
+    }
+
+    return { options, skipped };
+}
