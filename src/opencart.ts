@@ -438,3 +438,16 @@ export async function getProductCategories(
         enabled: row.status === 1,
     }));
 }
+
+interface ProductIdRow extends RowDataPacket {
+    product_id: number;
+}
+
+// Every product ID in OpenCart, in order.
+export async function getProductIds(connection: Connection): Promise<number[]> {
+    const { dbPrefix } = getSettings();
+    const [rows] = await connection.execute<ProductIdRow[]>(
+        `SELECT product_id FROM \`${dbPrefix}product\` ORDER BY product_id`,
+    );
+    return rows.map((row) => row.product_id);
+}

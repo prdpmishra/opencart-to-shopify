@@ -9,6 +9,7 @@ import {
     getProductImages,
     getPriceRules,
     getProductCategories,
+    getProductIds,
     getProductOptions,
     type FullProduct,
 } from "./opencart.ts";
@@ -29,7 +30,21 @@ import {
 } from "./shopify.ts";
 
 const USAGE =
-    "Usage: npm run migrate -- <opencart-product-id> [--update] [--dry-run]";
+    "Usage: npm run migrate -- <opencart-product-id> [--update] [--dry-run]\n" +
+    "       npm run migrate -- --all [--update] [--dry-run]";
+
+// What happened to one product.
+type Result = "created" | "updated" | "up to date" | "skipped" | "dry run";
+
+interface RunOptions {
+    update: boolean;
+    dryRun: boolean;
+    // Create products that aren't migrated yet. Always true with --all; for one
+    // product, --update means "update only", so a missing product is an error.
+    createMissing: boolean;
+    locationId: string;
+    priceTaxRate: number | null;
+}
 
 async function main() {
     let args;
@@ -40,6 +55,7 @@ async function main() {
             options: {
                 "dry-run": { type: "boolean", default: false },
                 update: { type: "boolean", default: false },
+                all: { type: "boolean", default: false },
             },
         });
     } catch (error) {
@@ -49,27 +65,12 @@ async function main() {
         return;
     }
 
+    const { all, update } = args.values;
     const dryRun = args.values["dry-run"];
-    const update = args.values.update;
     const id = Number(args.positionals[0]);
-    if (args.positionals.length !== 1 || !Number.isInteger(id) || id < 1) {
+    const validId = args.positionals.length === 1 && Number.isInteger(id) && id >= 1;
+    if (all ? args.positionals.length > 0 : !validId) {
         console.error(USAGE);
-        process.exitCode = 1;
-        return;
-    }
-
-    const existing = findMapping("product", id);
-    if (existing && !update) {
-        console.log(
-            `Product ${id} was already migrated to ${existing.shopify_id} on ${existing.migrated_at} (UTC). ` +
-                "Nothing to do. Use --update to update it.",
-        );
-        return;
-    }
-    if (!existing && update) {
-        console.error(
-            `Product ${id} has not been migrated yet, so there is nothing to update. Run without --update to create it.`,
-        );
         process.exitCode = 1;
         return;
     }
@@ -78,26 +79,6 @@ async function main() {
 
     try {
         connection = await connect();
-        const locationId = requireEnv("SHOPIFY_LOCATION_ID");
-        const product = await getProduct(connection, id);
-        const { options, skipped } = await getProductOptions(connection, id);
-
-        // Customer inputs (checkbox, text, date, file, ...) have no Shopify equivalent.
-        for (const option of skipped)
-            console.warn(
-                `Warning: product ${id}: option "${option.name}" (${option.type}) is not migrated, ` +
-                    "Shopify has no standard equivalent." +
-                    (option.required ? " It is required in OpenCart, but Shopify customers won't be asked for it." : ""),
-            );
-
-        const { special, notMigrated } = await getPriceRules(connection, id);
-        for (const rule of notMigrated)
-            console.warn(`Warning: product ${id}: ${rule} is not migrated.`);
-        if (special?.endDate)
-            console.warn(
-                `Warning: product ${id}: the special price ends on ${special.endDate} in OpenCart, ` +
-                    "but Shopify won't end the sale by itself. Run --update after that date.",
-            );
 
         // OpenCart prices exclude tax. If Shopify's prices include tax, add it.
         let priceTaxRate: number | null = null;
@@ -108,50 +89,43 @@ async function main() {
             console.log(`Shopify prices include tax: adding ${priceTaxRate}% to OpenCart's prices.`);
         }
 
-        if (product.taxClassId !== 0 && !product.taxClassExists)
-            console.warn(
-                `Warning: product ${id}: tax class ${product.taxClassId} doesn't exist in OpenCart, ` +
-                    "so OpenCart charges no tax for it. It is migrated as not taxable.",
-            );
-        if (product.hasFixedTax)
-            console.warn(
-                `Warning: product ${id}: its tax class includes a fixed tax amount (e.g. an eco tax), ` +
-                    "which Shopify has no equivalent for. It is not migrated.",
-            );
-        if (product.weight !== 0 && !shopifyWeightUnit(product.weightUnit))
-            console.warn(
-                `Warning: product ${id}: weight unit "${product.weightUnit ?? "none"}" has no Shopify equivalent ` +
-                    "(kg, g, lb or oz), so the weight is not migrated.",
-            );
-        if (product.hasDimensions)
-            console.warn(
-                `Warning: product ${id}: length, width and height are not migrated. ` +
-                    "Shopify products have no dimensions; parcel sizes are set as shipping packages.",
-            );
-        if (!product.enabled)
-            console.log(`Product ${id} is disabled in OpenCart, so it becomes a draft in Shopify.`);
-        else if (product.availableLater)
-            console.log(
-                `Product ${id}'s "Date Available" is in the future, so it becomes a draft in Shopify. ` +
-                    "Run --update after that date to make it active.",
-            );
-
-        const input = toProductSetInput(product, locationId, options, special, priceTaxRate);
-
-        // Before comparing or sending, so the description has Shopify image URLs.
-        input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
-
-        // Each category becomes a collection; missing ones are created first.
-        const collections = await prepareCollections(
-            await getProductCategories(connection, id),
+        const options: RunOptions = {
+            update,
             dryRun,
-        );
+            createMissing: all || !update,
+            locationId: requireEnv("SHOPIFY_LOCATION_ID"),
+            priceTaxRate,
+        };
 
-        if (existing)
-            await updateProduct(id, existing.shopify_id, input, collections, locationId, dryRun);
-        else {
-            input.collections = collections.flatMap((c) => (c.id ? [c.id] : []));
-            await createProduct(connection, product, input, dryRun);
+        if (!all) {
+            await migrateProduct(connection, id, options);
+            return;
+        }
+
+        // --all: one product failing doesn't stop the others; everything is reported at the end.
+        const ids = await getProductIds(connection);
+        const counts = new Map<Result | "failed", number>();
+        const failures: string[] = [];
+
+        for (const [i, productId] of ids.entries()) {
+            console.log(`\n── Product ${productId} (${i + 1}/${ids.length}) ──`);
+            let result: Result | "failed";
+            try {
+                result = await migrateProduct(connection, productId, options);
+            } catch (error) {
+                result = "failed";
+                const message = error instanceof Error ? error.message : String(error);
+                failures.push(`  ${productId}: ${message}`);
+                console.error(`Failed: ${message}`);
+            }
+            counts.set(result, (counts.get(result) ?? 0) + 1);
+        }
+
+        console.log(`\n── Summary: ${ids.length} product(s) ──`);
+        for (const [result, count] of counts) console.log(`  ${result}: ${count}`);
+        if (failures.length > 0) {
+            console.log(`Failed products:\n${failures.join("\n")}`);
+            process.exitCode = 1;
         }
     } catch (error) {
         console.error(
@@ -164,14 +138,99 @@ async function main() {
     }
 }
 
+// Migrates one product: creates it, updates it or skips it, depending on the
+// mapping and the options. Errors are thrown to the caller.
+async function migrateProduct(
+    connection: Connection,
+    id: number,
+    { update, dryRun, createMissing, locationId, priceTaxRate }: RunOptions,
+): Promise<Result> {
+    const existing = findMapping("product", id);
+    if (existing && !update) {
+        console.log(
+            `Product ${id} was already migrated to ${existing.shopify_id} on ${existing.migrated_at} (UTC). ` +
+                "Nothing to do. Use --update to update it.",
+        );
+        return "skipped";
+    }
+    if (!existing && !createMissing)
+        throw new Error(
+            `Product ${id} has not been migrated yet, so there is nothing to update. Run without --update to create it.`,
+        );
+
+    const product = await getProduct(connection, id);
+    const { options, skipped } = await getProductOptions(connection, id);
+
+    // Customer inputs (checkbox, text, date, file, ...) have no Shopify equivalent.
+    for (const option of skipped)
+        console.warn(
+            `Warning: product ${id}: option "${option.name}" (${option.type}) is not migrated, ` +
+                "Shopify has no standard equivalent." +
+                (option.required ? " It is required in OpenCart, but Shopify customers won't be asked for it." : ""),
+        );
+
+    const { special, notMigrated } = await getPriceRules(connection, id);
+    for (const rule of notMigrated)
+        console.warn(`Warning: product ${id}: ${rule} is not migrated.`);
+    if (special?.endDate)
+        console.warn(
+            `Warning: product ${id}: the special price ends on ${special.endDate} in OpenCart, ` +
+                "but Shopify won't end the sale by itself. Run --update after that date.",
+        );
+
+    if (product.taxClassId !== 0 && !product.taxClassExists)
+        console.warn(
+            `Warning: product ${id}: tax class ${product.taxClassId} doesn't exist in OpenCart, ` +
+                "so OpenCart charges no tax for it. It is migrated as not taxable.",
+        );
+    if (product.hasFixedTax)
+        console.warn(
+            `Warning: product ${id}: its tax class includes a fixed tax amount (e.g. an eco tax), ` +
+                "which Shopify has no equivalent for. It is not migrated.",
+        );
+    if (product.weight !== 0 && !shopifyWeightUnit(product.weightUnit))
+        console.warn(
+            `Warning: product ${id}: weight unit "${product.weightUnit ?? "none"}" has no Shopify equivalent ` +
+                "(kg, g, lb or oz), so the weight is not migrated.",
+        );
+    if (product.hasDimensions)
+        console.warn(
+            `Warning: product ${id}: length, width and height are not migrated. ` +
+                "Shopify products have no dimensions; parcel sizes are set as shipping packages.",
+        );
+    if (!product.enabled)
+        console.log(`Product ${id} is disabled in OpenCart, so it becomes a draft in Shopify.`);
+    else if (product.availableLater)
+        console.log(
+            `Product ${id}'s "Date Available" is in the future, so it becomes a draft in Shopify. ` +
+                "Run --update after that date to make it active.",
+        );
+
+    const input = toProductSetInput(product, locationId, options, special, priceTaxRate);
+
+    // Before comparing or sending, so the description has Shopify image URLs.
+    input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
+
+    // Each category becomes a collection; missing ones are created first.
+    const collections = await prepareCollections(
+        await getProductCategories(connection, id),
+        dryRun,
+    );
+
+    if (existing)
+        return updateProduct(id, existing.shopify_id, input, collections, locationId, dryRun);
+
+    input.collections = collections.flatMap((c) => (c.id ? [c.id] : []));
+    return createProduct(connection, product, input, dryRun);
+}
+
 async function createProduct(
     connection: Connection,
     product: FullProduct,
     input: ProductSetInput,
     dryRun: boolean,
-) {
+): Promise<Result> {
     const id = product.id;
-    console.log(JSON.stringify(input, null, 2));
 
     // Find the image files on disk. Missing ones are skipped with a warning.
     const imageDir = requireEnv("OPENCART_IMAGE_DIR");
@@ -187,8 +246,9 @@ async function createProduct(
     }
 
     if (dryRun) {
+        console.log(JSON.stringify(input, null, 2));
         console.log("Dry run: Shopify was not called, nothing was uploaded and no mapping was saved.");
-        return;
+        return "dry run";
     }
 
     // Upload each image. A failed upload is skipped with a warning.
@@ -250,6 +310,8 @@ async function createProduct(
         if (ready < uploaded.length)
             console.warn(`Warning: only ${ready} of ${uploaded.length} image(s) are ready. Check the product in Shopify admin.`);
     }
+
+    return "created";
 }
 
 // A weight of 0 is the same in any unit; otherwise unit and value must match.
@@ -279,7 +341,7 @@ async function updateProduct(
     collections: ProductCollection[],
     locationId: string,
     dryRun: boolean,
-) {
+): Promise<Result> {
     const current = await getShopifyProduct(shopifyId, locationId);
     if (!current)
         throw new Error(
@@ -398,14 +460,14 @@ async function updateProduct(
 
     if (changes.length === 0) {
         console.log(`Product ${id} is already up to date in Shopify (${shopifyId}). Nothing to do.`);
-        return;
+        return "up to date";
     }
 
     console.log(`Product ${id} changes:\n  ${changes.join("\n  ")}`);
 
     if (dryRun) {
         console.log("Dry run: Shopify was not called.");
-        return;
+        return "dry run";
     }
 
     if (productChanged) {
@@ -423,6 +485,7 @@ async function updateProduct(
     if (publish) await publishToOnlineStore(shopifyId);
 
     console.log(`Updated product ${id} in Shopify: ${shopifyId}\n  ${adminProductUrl(shopifyId)}`);
+    return "updated";
 }
 
 main();

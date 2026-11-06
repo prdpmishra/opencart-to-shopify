@@ -65,9 +65,18 @@ npm run migrate -- 48 --dry-run  # show what would be sent for OpenCart product 
 npm run migrate -- 48            # create it in Shopify
 npm run migrate -- 48 --update --dry-run  # show what would change in Shopify
 npm run migrate -- 48 --update   # update the migrated product from OpenCart
+npm run migrate -- --all --dry-run  # check every product without changing anything
+npm run migrate -- --all         # create every product not migrated yet
+npm run migrate -- --all --update  # also update the ones already migrated
 npm start                        # list OpenCart and Shopify products
 npm run typecheck                # type-check without running
 ```
+
+### Migrating all products (`--all`)
+
+`--all` goes through every OpenCart product in ID order. Products that aren't migrated yet are created; already-migrated ones are skipped, or updated with `--update`. If one product fails, the error is logged and the run continues. At the end a summary shows how many products were created, updated, up to date, skipped or failed, with each failure's error, and the exit code is 1 if any failed. A run can safely be repeated: the mapping in `migration.sqlite` prevents duplicates.
+
+Shopify limits how much API work an app can do per second. When a request is refused as throttled (or with HTTP 429), the script waits as long as Shopify says is needed and retries, up to 5 times.
 
 ### How `migrate` works
 

@@ -1,3 +1,4 @@
+import { decode } from "he";
 import type { FullProduct, OptionValue, ProductOption, Special } from "./opencart.ts";
 
 export type WeightUnit = "KILOGRAMS" | "GRAMS" | "POUNDS" | "OUNCES";
@@ -190,10 +191,14 @@ export function toProductSetInput(
     };
 }
 
-// Shopify reformats HTML when saving it, e.g. it puts a newline between </p><p>.
-// Whitespace between tags doesn't change the page, so it's ignored when comparing.
+// Shopify reformats HTML when saving it: it puts a newline between </p><p>, turns
+// entities into characters (&quot; → ", &rsquo; → ’, &nbsp; → a non-breaking space)
+// and writes <br /> as <br>. None of this changes the page, so it's ignored when comparing.
 export function sameHtml(a: string, b: string): boolean {
-    const normalise = (html: string) => html.replace(/>\s+</g, "><");
+    const normalise = (html: string) =>
+        decode(html)
+            .replace(/\s*\/>/g, ">")
+            .replace(/>\s+</g, "><");
     return normalise(a) === normalise(b);
 }
 

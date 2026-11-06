@@ -11,8 +11,17 @@ interface TokenResponse {
 
 interface GraphQLResponse<T> {
     data?: T;
-    errors?: { message: string }[];
+    errors?: { message: string; extensions?: { code?: string } }[];
+    extensions?: {
+        cost?: {
+            requestedQueryCost: number;
+            throttleStatus: { currentlyAvailable: number; restoreRate: number };
+        };
+    };
 }
+
+// How often a throttled request is retried before giving up.
+const MAX_RETRIES = 5;
 
 // Accept either "my-store" or "my-store.myshopify.com".
 function shopDomain(): string {
@@ -56,31 +65,57 @@ export async function graphql<T>(
     variables: Record<string, unknown> = {},
 ): Promise<T> {
     const apiVersion = requireEnv("SHOPIFY_API_VERSION");
-    const response = await fetch(
-        `https://${shopDomain()}/admin/api/${apiVersion}/graphql.json`,
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "X-Shopify-Access-Token": await getToken(),
+
+    for (let attempt = 0; ; attempt++) {
+        const response = await fetch(
+            `https://${shopDomain()}/admin/api/${apiVersion}/graphql.json`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-Shopify-Access-Token": await getToken(),
+                },
+                body: JSON.stringify({ query, variables }),
             },
-            body: JSON.stringify({ query, variables }),
-        },
-    );
-
-    if (!response.ok) {
-        throw new Error(
-            `GraphQL request failed: ${response.status} ${await response.text()}`,
         );
-    }
 
-    const { data, errors } = (await response.json()) as GraphQLResponse<T>;
-    if (errors?.length) {
-        throw new Error(`GraphQL errors: ${JSON.stringify(errors)}`);
-    }
-    if (data === undefined) throw new Error("GraphQL response had no data");
+        // 429: too many requests at the HTTP level. Wait a moment and try again.
+        if (response.status === 429 && attempt < MAX_RETRIES) {
+            await waitSeconds(2, "too many requests");
+            continue;
+        }
+        if (!response.ok) {
+            throw new Error(
+                `GraphQL request failed: ${response.status} ${await response.text()}`,
+            );
+        }
 
-    return data;
+        const { data, errors, extensions } = (await response.json()) as GraphQLResponse<T>;
+
+        // Shopify allows a certain query cost per second. When it's used up, it refuses
+        // with THROTTLED and says how fast the allowance comes back, so wait for that.
+        if (errors?.some((e) => e.extensions?.code === "THROTTLED") && attempt < MAX_RETRIES) {
+            const cost = extensions?.cost;
+            const seconds = cost
+                ? (cost.requestedQueryCost - cost.throttleStatus.currentlyAvailable) /
+                  cost.throttleStatus.restoreRate
+                : 2;
+            await waitSeconds(Math.max(1, Math.ceil(seconds)), "Shopify rate limit");
+            continue;
+        }
+
+        if (errors?.length) {
+            throw new Error(`GraphQL errors: ${JSON.stringify(errors)}`);
+        }
+        if (data === undefined) throw new Error("GraphQL response had no data");
+
+        return data;
+    }
+}
+
+async function waitSeconds(seconds: number, reason: string): Promise<void> {
+    console.log(`Waiting ${seconds}s (${reason})...`);
+    await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 }
 
 interface ProductSetResult {
