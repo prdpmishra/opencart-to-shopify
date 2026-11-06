@@ -171,6 +171,7 @@ export interface ShopifyVariant {
     price: string;
     compareAtPrice: string | null;
     sku: string | null;
+    taxable: boolean;
     inventoryPolicy: string;
     inventoryItemId: string;
     tracked: boolean;
@@ -193,6 +194,7 @@ interface ProductQueryResult {
                 price: string;
                 compareAtPrice: string | null;
                 sku: string | null;
+                taxable: boolean;
                 inventoryPolicy: string;
                 inventoryItem: {
                     id: string;
@@ -225,6 +227,7 @@ const PRODUCT_QUERY = `
                     price
                     compareAtPrice
                     sku
+                    taxable
                     inventoryPolicy
                     inventoryItem {
                         id
@@ -266,6 +269,7 @@ export async function getShopifyProduct(
             price: v.price,
             compareAtPrice: v.compareAtPrice,
             sku: v.sku,
+            taxable: v.taxable,
             inventoryPolicy: v.inventoryPolicy,
             inventoryItemId: v.inventoryItem.id,
             tracked: v.inventoryItem.tracked,
@@ -348,6 +352,14 @@ export async function setAvailableQuantity(
         throw new Error(
             `Could not set the quantity: ${inventorySetQuantities.userErrors.map((e) => e.message).join("; ")}`,
         );
+}
+
+// Shopify's store setting "All prices include tax".
+export async function getShopTaxesIncluded(): Promise<boolean> {
+    const { shop } = await graphql<{ shop: { taxesIncluded: boolean } }>(
+        "{ shop { taxesIncluded } }",
+    );
+    return shop.taxesIncluded;
 }
 
 // "gid://shopify/Product/123" → the product's page in Shopify admin.

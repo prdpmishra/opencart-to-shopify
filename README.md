@@ -41,6 +41,7 @@ SHOPIFY_CLIENT_ID=
 SHOPIFY_CLIENT_SECRET=
 SHOPIFY_API_VERSION=2026-10
 SHOPIFY_LOCATION_ID=gid://shopify/Location/123456789
+PRICE_TAX_RATE=
 ```
 
 | Variable | Required | Notes |
@@ -55,6 +56,7 @@ SHOPIFY_LOCATION_ID=gid://shopify/Location/123456789
 | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | Yes | From the Shopify app's settings |
 | `SHOPIFY_API_VERSION` | Yes | Admin API version, e.g. `2026-10` |
 | `SHOPIFY_LOCATION_ID` | Yes, for `migrate` | The Shopify location that gets OpenCart's stock |
+| `PRICE_TAX_RATE` | Only if Shopify's "All prices include tax" is on | Tax rate in % added to OpenCart's prices, e.g. `20` |
 
 ## Usage
 
@@ -76,6 +78,7 @@ npm run typecheck                # type-check without running
    - **SKU:** the OpenCart SKU, or the model if the SKU is empty. Variants get the SKU plus their option values, e.g. `Product 8-small`.
    - **Price:** unchanged, rounded to 2 decimals. A variant's price is the product price plus (or minus) its option values' price modifiers.
    - **Special price:** the special that OpenCart applies right now for the default customer group (start date empty or past, end date empty or future; lowest priority, then lowest price) becomes the sale price, and the normal price becomes the compare-at price, which themes show crossed out. Without a special, the compare-at price is cleared. Shopify can't schedule price changes, so a special with an end date gives a warning to run `--update` after it ends, and a future special is applied by an `--update` after it starts. Specials for other customer groups and quantity discounts (`product_discount`) are not migrated; each one gives a warning.
+   - **Tax:** a product is taxable ("Charge tax on this product") when its OpenCart tax class has at least one tax rule. OpenCart stores prices excluding tax, so they're sent unchanged when Shopify's "All prices include tax" setting is off. When it's on, `PRICE_TAX_RATE` is added (e.g. 100.00 at 20% → 120.00), so customers pay the same total; without `PRICE_TAX_RATE` the run stops. Tax rates themselves aren't product data in Shopify: set them up in Shopify's tax settings. Fixed tax amounts (e.g. an eco tax) have no Shopify equivalent and give a warning.
    - **Variants:** select and radio options (up to 3, Shopify's limit) become Shopify options, and every combination of their values becomes a variant. Products without them get Shopify's single `Default Title` variant. Other option types (checkbox, text, textarea, date, time, date & time, file) are customer inputs with no standard Shopify equivalent: they are skipped with a warning, which also says when the option was required.
    - **Stock:** OpenCart's "Subtract Stock" becomes Shopify's "Track quantity". For tracked products, the quantity becomes the available quantity at `SHOPIFY_LOCATION_ID`. OpenCart tracks stock per product and per option value, not per combination, so a variant gets the lowest quantity that OpenCart tracks for it (the product's and each chosen value's). OpenCart's "allow checkout when out of stock" store setting becomes "Continue selling when out of stock". OpenCart's stock status text ("2-3 Days", "Pre-Order") and minimum order quantity have no Shopify equivalent and are not migrated.
    - **Description clean-up:** the HTML is tidied to match what Shopify's editor produces: HTML comments and `class` attributes are removed, `<font>` tags are removed (their text is kept, so the theme's font is used), `<b>`/`<i>` become `<strong>`/`<em>`, and line breaks and tabs are collapsed. The visible text doesn't change.

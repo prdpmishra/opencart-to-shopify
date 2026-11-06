@@ -15,12 +15,19 @@ export interface ProductSetInput {
         // The original price during a sale; null clears it when the sale has ended.
         compareAtPrice: string | null;
         sku?: string;
+        taxable: boolean; // Shopify's "Charge tax on this product"
         inventoryItem: { tracked: boolean };
         inventoryPolicy: "DENY" | "CONTINUE";
         // Only used when creating; updates set the quantity with inventorySetQuantities.
         inventoryQuantities?: { locationId: string; name: "available"; quantity: number }[];
     }[];
     files?: { originalSource: string; alt: string; contentType: "IMAGE" }[];
+}
+
+// Rounds to whole cents. Math.round on cents avoids results like 1.005 → 1.00,
+// which toFixed(2) gives because 1.005 is stored as 1.00499999...
+export function roundCents(amount: number): number {
+    return Math.round(Number((amount * 100).toFixed(6))) / 100;
 }
 
 // Shopify allows at most 3 options per product.
@@ -30,12 +37,16 @@ const MAX_OPTIONS = 3;
 // becomes a Shopify variant. Without options the product gets one variant.
 // special: OpenCart's active special price. It becomes the sale price, with the
 // normal price as Shopify's compare-at price (shown crossed out).
+// priceTaxRate: OpenCart prices exclude tax. When Shopify's prices include tax,
+// this is the rate in % to add (e.g. 20); null sends the prices unchanged.
 export function toProductSetInput(
     product: FullProduct,
     locationId: string,
     options: ProductOption[],
     special: Special | null,
+    priceTaxRate: number | null,
 ): ProductSetInput {
+    const taxFactor = priceTaxRate === null ? 1 : 1 + priceTaxRate / 100;
     const label = `Product ${product.id}`;
 
     const basePrice = Number(product.price);
@@ -79,8 +90,9 @@ export function toProductSetInput(
         // OpenCart adds each chosen value's price modifier to the product price,
         // or to the special price when there is one.
         const modifiers = combination.reduce((sum, c) => sum + c.value.priceModifier, 0);
-        const normalPrice = basePrice + modifiers;
-        const price = (special ? special.price : basePrice) + modifiers;
+        // Rounded to cents here, so price and compare-at are compared as Shopify stores them.
+        const normalPrice = roundCents((basePrice + modifiers) * taxFactor);
+        const price = roundCents(((special ? special.price : basePrice) + modifiers) * taxFactor);
         if (price < 0)
             throw new Error(`${label}: variant ${optionValues.map((o) => o.name).join(" / ")} has a negative price.`);
 
@@ -102,6 +114,7 @@ export function toProductSetInput(
             // OpenCart's "Subtract Stock" is Shopify's "Track quantity".
             inventoryItem: { tracked },
             inventoryPolicy: product.allowOutOfStockCheckout ? "CONTINUE" : "DENY",
+            taxable: product.taxable,
         };
 
         // Shopify ignores quantities of untracked items, so only send them when tracked.

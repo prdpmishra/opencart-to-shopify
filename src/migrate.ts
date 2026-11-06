@@ -16,6 +16,7 @@ import { rewriteDescriptionImages } from "./description.ts";
 import { findMapping, saveMapping } from "./mapping.ts";
 import {
     adminProductUrl,
+    getShopTaxesIncluded,
     getShopifyProduct,
     saveProduct,
     setAvailableQuantity,
@@ -95,7 +96,27 @@ async function main() {
                     "but Shopify won't end the sale by itself. Run --update after that date.",
             );
 
-        const input = toProductSetInput(product, locationId, options, special);
+        // OpenCart prices exclude tax. If Shopify's prices include tax, add it.
+        let priceTaxRate: number | null = null;
+        if (await getShopTaxesIncluded()) {
+            priceTaxRate = Number(requireEnv("PRICE_TAX_RATE"));
+            if (!Number.isFinite(priceTaxRate) || priceTaxRate < 0)
+                throw new Error("PRICE_TAX_RATE must be a number of percent, e.g. 20.");
+            console.log(`Shopify prices include tax: adding ${priceTaxRate}% to OpenCart's prices.`);
+        }
+
+        if (product.taxClassId !== 0 && !product.taxClassExists)
+            console.warn(
+                `Warning: product ${id}: tax class ${product.taxClassId} doesn't exist in OpenCart, ` +
+                    "so OpenCart charges no tax for it. It is migrated as not taxable.",
+            );
+        if (product.hasFixedTax)
+            console.warn(
+                `Warning: product ${id}: its tax class includes a fixed tax amount (e.g. an eco tax), ` +
+                    "which Shopify has no equivalent for. It is not migrated.",
+            );
+
+        const input = toProductSetInput(product, locationId, options, special, priceTaxRate);
 
         // Before comparing or sending, so the description has Shopify image URLs.
         input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
@@ -271,6 +292,8 @@ async function updateProduct(
             variantChanges.push(
                 `compare-at ${currentVariant.compareAtPrice ?? "none"} → ${newVariant.compareAtPrice ?? "none"}`,
             );
+        if (currentVariant.taxable !== newVariant.taxable)
+            variantChanges.push(`charge tax ${currentVariant.taxable} → ${newVariant.taxable}`);
         if ((currentVariant.sku ?? "") !== (newVariant.sku ?? ""))
             variantChanges.push(`sku "${currentVariant.sku ?? ""}" → "${newVariant.sku ?? ""}"`);
         if (currentVariant.tracked !== newVariant.inventoryItem.tracked)

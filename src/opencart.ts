@@ -34,6 +34,10 @@ interface FullProductRow extends RowDataPacket {
     description: string | null;
     keyword: string | null;
     stock_checkout: string | null;
+    tax_class_id: number;
+    tax_class_exists: number;
+    has_tax_rules: number;
+    has_fixed_tax: number;
 }
 
 export interface FullProduct {
@@ -50,6 +54,13 @@ export interface FullProduct {
     subtractStock: boolean;
     /** Store setting: whether customers can buy when the quantity is 0. */
     allowOutOfStockCheckout: boolean;
+    taxClassId: number;
+    /** False when the tax class is set but doesn't exist in OpenCart. */
+    taxClassExists: boolean;
+    /** Whether OpenCart charges tax: the tax class has at least one tax rule. */
+    taxable: boolean;
+    /** Whether the tax class includes a fixed amount (e.g. an eco tax). */
+    hasFixedTax: boolean;
 }
 
 function getSettings() {
@@ -71,7 +82,14 @@ export async function getProduct(
     // OpenCart 3.0 keeps SEO keywords in seo_url, keyed by query = 'product_id=<id>'.
     const [results] = await connection.execute<FullProductRow[]>(
         `SELECT p.product_id, p.price, p.sku, p.model, p.quantity, p.subtract,
-            pd.name, pd.description, su.keyword,
+            pd.name, pd.description, su.keyword, p.tax_class_id,
+            EXISTS(SELECT 1 FROM \`${dbPrefix}tax_class\` tc
+                WHERE tc.tax_class_id = p.tax_class_id) AS tax_class_exists,
+            EXISTS(SELECT 1 FROM \`${dbPrefix}tax_rule\` trl
+                WHERE trl.tax_class_id = p.tax_class_id) AS has_tax_rules,
+            EXISTS(SELECT 1 FROM \`${dbPrefix}tax_rule\` trl
+                JOIN \`${dbPrefix}tax_rate\` tr ON tr.tax_rate_id = trl.tax_rate_id
+                WHERE trl.tax_class_id = p.tax_class_id AND tr.type = 'F') AS has_fixed_tax,
             (SELECT value FROM \`${dbPrefix}setting\`
                 WHERE store_id = 0 AND \`key\` = 'config_stock_checkout') AS stock_checkout
         FROM \`${dbPrefix}product\` p
@@ -97,6 +115,10 @@ export async function getProduct(
         quantity: row.quantity,
         subtractStock: row.subtract === 1,
         allowOutOfStockCheckout: row.stock_checkout === "1",
+        taxClassId: row.tax_class_id,
+        taxClassExists: row.tax_class_exists === 1,
+        taxable: row.has_tax_rules === 1,
+        hasFixedTax: row.has_fixed_tax === 1,
     };
 }
 
