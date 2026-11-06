@@ -42,12 +42,33 @@ export function toProductSetInput(product: FullProduct): ProductSetInput {
 
     return {
         title: product.name,
-        descriptionHtml: product.description,
+        descriptionHtml: cleanDescription(product.description),
         handle: buildHandle(product),
         status: "DRAFT",
         productOptions: [{ name: "Title", values: [{ name: "Default Title" }] }],
         variants: [variant],
     };
+}
+
+// Block tags start their own line on the page, so spaces around them never show.
+const BLOCK_TAG =
+    /\s*(<\/?(?:p|div|ul|ol|li|h[1-6]|br|table|thead|tbody|tr|td|th|blockquote)\b[^>]*>)\s*/gi;
+
+// Tidies OpenCart's description HTML into what Shopify's editor produces.
+// Only markup changes; the visible text stays the same.
+export function cleanDescription(html: string): string {
+    return (
+        html
+            .replace(/<!--[\s\S]*?-->/g, "") // HTML comments
+            .replace(/\sclass\s*=\s*("[^"]*"|'[^']*')/gi, "") // OpenCart's CSS classes mean nothing in a Shopify theme
+            .replace(/<\/?font\b[^>]*>/gi, "") // <font>: keep the text, let the theme pick the font
+            .replace(/<(\/?)b(\s[^>]*)?>/gi, "<$1strong$2>") // <b> → <strong>
+            .replace(/<(\/?)i(\s[^>]*)?>/gi, "<$1em$2>") // <i> → <em>
+            // Only real spaces, tabs and line breaks: a non-breaking space is kept.
+            .replace(/[ \t\r\n]+/g, " ")
+            .replace(BLOCK_TAG, "$1")
+            .trim()
+    );
 }
 
 // Shopify handles use lowercase letters, numbers and hyphens.
