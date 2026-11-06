@@ -339,3 +339,53 @@ export async function getPriceRules(
 
     return { special, notMigrated };
 }
+
+export interface Category {
+    id: number;
+    name: string;
+    description: string;
+    /** Path inside OpenCart's image folder, or null. */
+    image: string | null;
+    /** SEO URL keyword for store 0 and LANGUAGE_ID, or null if none is set. */
+    seoKeyword: string | null;
+    enabled: boolean;
+}
+
+interface CategoryRow extends RowDataPacket {
+    category_id: number;
+    name: string | null;
+    description: string | null;
+    image: string | null;
+    keyword: string | null;
+    status: number;
+}
+
+// The categories a product is in.
+export async function getProductCategories(
+    connection: Connection,
+    id: number,
+): Promise<Category[]> {
+    const { dbPrefix, languageId } = getSettings();
+
+    const [rows] = await connection.execute<CategoryRow[]>(
+        `SELECT c.category_id, cd.name, cd.description, c.image, su.keyword, c.status
+        FROM \`${dbPrefix}product_to_category\` ptc
+        JOIN \`${dbPrefix}category\` c ON c.category_id = ptc.category_id
+        LEFT JOIN \`${dbPrefix}category_description\` cd
+            ON cd.category_id = c.category_id AND cd.language_id = ?
+        LEFT JOIN \`${dbPrefix}seo_url\` su
+            ON su.query = CONCAT('category_id=', c.category_id) AND su.store_id = 0 AND su.language_id = ?
+        WHERE ptc.product_id = ?
+        ORDER BY c.sort_order, c.category_id`,
+        [languageId, languageId, id],
+    );
+
+    return rows.map((row) => ({
+        id: row.category_id,
+        name: decode(row.name ?? ""),
+        description: decode(row.description ?? ""),
+        image: row.image?.trim() || null,
+        seoKeyword: row.keyword || null,
+        enabled: row.status === 1,
+    }));
+}

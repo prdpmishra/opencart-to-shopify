@@ -29,6 +29,43 @@ export function toImagePath(src: string, imageUrl: string): string | null {
     }
 }
 
+// Returns the Shopify CDN URL of an image in OpenCart's image folder
+// (e.g. "catalog/demo/a.jpg"), uploading it to Shopify Files the first time.
+// Returns null if the file is missing, the upload fails, or in a dry run when
+// it hasn't been uploaded yet. "what" names the image in log messages.
+export async function toShopifyFileUrl(
+    path: string,
+    what: string,
+    dryRun: boolean,
+): Promise<string | null> {
+    const known = findFileMapping(path);
+    if (known) return known.shopify_url;
+
+    const fullPath = join(requireEnv("OPENCART_IMAGE_DIR"), path);
+    if (!existsSync(fullPath)) {
+        console.warn(`Warning: ${what} not found, skipping: ${fullPath}`);
+        return null;
+    }
+
+    if (dryRun) {
+        console.log(`${what} would be uploaded: ${fullPath}`);
+        return null;
+    }
+
+    try {
+        const file = await createImageFile(await uploadImage(fullPath, "IMAGE"));
+        saveFileMapping(path, file.id, file.url);
+        console.log(`${what} uploaded: ${fullPath} → ${file.url}`);
+        return file.url;
+    } catch (error) {
+        console.warn(
+            `Warning: ${what} upload failed, skipping ${fullPath}: ` +
+                (error instanceof Error ? error.message : error),
+        );
+        return null;
+    }
+}
+
 // Replaces OpenCart image URLs in a description with Shopify CDN URLs.
 // Each image is uploaded to Shopify Files once and remembered in file_mapping.
 // In a dry run nothing is uploaded: only already-uploaded images are replaced.
@@ -37,7 +74,6 @@ export async function rewriteDescriptionImages(
     dryRun: boolean,
 ): Promise<string> {
     const imageUrl = requireEnv("OPENCART_IMAGE_URL");
-    const imageDir = requireEnv("OPENCART_IMAGE_DIR");
 
     // Work out the new URL for each different src first, then replace them all.
     const newSrc = new Map<string, string>();
@@ -47,34 +83,8 @@ export async function rewriteDescriptionImages(
         const path = toImagePath(src, imageUrl);
         if (!path) continue;
 
-        const known = findFileMapping(path);
-        if (known) {
-            newSrc.set(src, known.shopify_url);
-            continue;
-        }
-
-        const fullPath = join(imageDir, path);
-        if (!existsSync(fullPath)) {
-            console.warn(`Warning: description image not found, keeping its URL: ${fullPath}`);
-            continue;
-        }
-
-        if (dryRun) {
-            console.log(`Description image would be uploaded: ${fullPath}`);
-            continue;
-        }
-
-        try {
-            const file = await createImageFile(await uploadImage(fullPath, "IMAGE"));
-            saveFileMapping(path, file.id, file.url);
-            newSrc.set(src, file.url);
-            console.log(`Description image uploaded: ${fullPath} → ${file.url}`);
-        } catch (error) {
-            console.warn(
-                `Warning: description image upload failed, keeping its URL: ${fullPath}: ` +
-                    (error instanceof Error ? error.message : error),
-            );
-        }
+        const url = await toShopifyFileUrl(path, "Description image", dryRun);
+        if (url) newSrc.set(src, url);
     }
 
     return html.replace(IMG_SRC, (match, before: string, quote: string, src: string) => {

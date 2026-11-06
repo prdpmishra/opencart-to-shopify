@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 
-export type EntityType = "product";
+export type EntityType = "product" | "category";
 
 export interface Mapping {
     opencart_id: number;
@@ -82,4 +82,13 @@ export function saveMapping(
             "INSERT INTO mapping (opencart_id, entity_type, shopify_id) VALUES (?, ?, ?)",
         )
         .run(opencartId, entityType, shopifyId);
+}
+
+// Whether this Shopify ID was created by the migration (e.g. a collection from an OpenCart category).
+export function isMappedShopifyId(entityType: EntityType, shopifyId: string): boolean {
+    return (
+        getDb()
+            .prepare("SELECT 1 FROM mapping WHERE entity_type = ? AND shopify_id = ?")
+            .get(entityType, shopifyId) !== undefined
+    );
 }

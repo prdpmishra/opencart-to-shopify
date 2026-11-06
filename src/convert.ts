@@ -21,6 +21,8 @@ export interface ProductSetInput {
         // Only used when creating; updates set the quantity with inventorySetQuantities.
         inventoryQuantities?: { locationId: string; name: "available"; quantity: number }[];
     }[];
+    // The product's complete list of collections; productSet replaces the existing list.
+    collections?: string[];
     files?: { originalSource: string; alt: string; contentType: "IMAGE" }[];
 }
 
@@ -146,6 +148,13 @@ export function toProductSetInput(
     };
 }
 
+// Shopify reformats HTML when saving it, e.g. it puts a newline between </p><p>.
+// Whitespace between tags doesn't change the page, so it's ignored when comparing.
+export function sameHtml(a: string, b: string): boolean {
+    const normalise = (html: string) => html.replace(/>\s+</g, "><");
+    return normalise(a) === normalise(b);
+}
+
 // Block tags start their own line on the page, so spaces around them never show.
 const BLOCK_TAG =
     /\s*(<\/?(?:p|div|ul|ol|li|h[1-6]|br|table|thead|tbody|tr|td|th|blockquote)\b[^>]*>)\s*/gi;
@@ -177,9 +186,13 @@ export function toHandle(text: string): string {
         .replace(/^-+|-+$/g, ""); // no hyphens at the start or end
 }
 
-// SEO keyword first, then the product name, then "product-<id>".
-export function buildHandle(product: FullProduct): string {
-    const label = `Product ${product.id}`;
+// SEO keyword first, then the name, then "<kind>-<id>" (e.g. "product-48").
+// Works for anything with an ID, a name and an SEO keyword: products and categories.
+export function buildHandle(
+    product: { id: number; name: string; seoKeyword: string | null },
+    kind: "product" | "category" = "product",
+): string {
+    const label = `${kind === "product" ? "Product" : "Category"} ${product.id}`;
 
     if (product.seoKeyword) {
         const handle = toHandle(product.seoKeyword);
@@ -204,7 +217,7 @@ export function buildHandle(product: FullProduct): string {
         return fromName;
     }
 
-    const fallback = `product-${product.id}`;
+    const fallback = `${kind}-${product.id}`;
     console.log(`${label}: name has no usable characters, using handle "${fallback}"`);
     return fallback;
 }

@@ -162,6 +162,7 @@ export interface ShopifyProduct {
     handle: string;
     status: string;
     variants: ShopifyVariant[];
+    collections: { id: string; title: string }[];
 }
 
 export interface ShopifyVariant {
@@ -186,6 +187,7 @@ interface ProductQueryResult {
         descriptionHtml: string;
         handle: string;
         status: string;
+        collections: { pageInfo: { hasNextPage: boolean }; nodes: { id: string; title: string }[] };
         variants: {
             pageInfo: { hasNextPage: boolean };
             nodes: {
@@ -214,6 +216,15 @@ const PRODUCT_QUERY = `
             descriptionHtml
             handle
             status
+            collections(first: 250) {
+                pageInfo {
+                    hasNextPage
+                }
+                nodes {
+                    id
+                    title
+                }
+            }
             variants(first: 250) {
                 pageInfo {
                     hasNextPage
@@ -260,9 +271,12 @@ export async function getShopifyProduct(
     // the update delete the variants we didn't see, so stop instead.
     if (product.variants.pageInfo.hasNextPage)
         throw new Error(`Shopify product ${productId} has more than 250 variants, which isn't supported.`);
+    if (product.collections.pageInfo.hasNextPage)
+        throw new Error(`Shopify product ${productId} is in more than 250 collections, which isn't supported.`);
 
     return {
         ...product,
+        collections: product.collections.nodes,
         variants: product.variants.nodes.map((v) => ({
             id: v.id,
             selectedOptions: v.selectedOptions,
@@ -585,4 +599,141 @@ export async function waitForImages(
 
         await new Promise((resolve) => setTimeout(resolve, 2000));
     }
+}
+
+export interface CollectionInput {
+    title: string;
+    descriptionHtml: string;
+    handle?: string;
+    image?: { src: string; altText: string };
+}
+
+const COLLECTION_CREATE = `
+    mutation CreateCollection($collection: CollectionCreateInput!) {
+        collectionCreate(collection: $collection) {
+            collection {
+                id
+                handle
+            }
+            userErrors {
+                field
+                message
+            }
+        }
+    }
+`;
+
+const COLLECTION_UPDATE = `
+    mutation UpdateCollection($collection: CollectionUpdateInput!) {
+        collectionUpdate(collection: $collection) {
+            collection {
+                id
+            }
+            userErrors {
+                field
+                message
+            }
+        }
+    }
+`;
+
+const COLLECTION_QUERY = `
+    query GetCollection($id: ID!) {
+        collection(id: $id) {
+            id
+            title
+            descriptionHtml
+        }
+    }
+`;
+
+// Each sales channel is an app; the Online Store app's handle is "online_store".
+const PUBLICATIONS_QUERY = `
+    query Publications {
+        publications(first: 50) {
+            nodes {
+                id
+                catalog {
+                    ... on AppCatalog {
+                        apps(first: 1) {
+                            nodes {
+                                handle
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+`;
+
+const PUBLISHABLE_PUBLISH = `
+    mutation Publish($id: ID!, $input: [PublicationInput!]!) {
+        publishablePublish(id: $id, input: $input) {
+            userErrors {
+                field
+                message
+            }
+        }
+    }
+`;
+
+function throwUserErrors(what: string, userErrors: { message: string }[]): void {
+    if (userErrors.length > 0)
+        throw new Error(`${what}: ${userErrors.map((e) => e.message).join("; ")}`);
+}
+
+export async function createCollection(
+    input: CollectionInput,
+): Promise<{ id: string; handle: string }> {
+    const { collectionCreate } = await graphql<{
+        collectionCreate: { collection: { id: string; handle: string } | null } & UserErrorsResult;
+    }>(COLLECTION_CREATE, { collection: input });
+    throwUserErrors("Shopify rejected the collection", collectionCreate.userErrors);
+    if (!collectionCreate.collection) throw new Error("Shopify returned no collection.");
+    return collectionCreate.collection;
+}
+
+export async function updateCollection(
+    id: string,
+    input: { title: string; descriptionHtml: string },
+): Promise<void> {
+    const { collectionUpdate } = await graphql<{ collectionUpdate: UserErrorsResult }>(
+        COLLECTION_UPDATE,
+        { collection: { id, ...input } },
+    );
+    throwUserErrors("Shopify rejected the collection update", collectionUpdate.userErrors);
+}
+
+// Returns null if the collection doesn't exist (e.g. it was deleted in Shopify).
+export async function getCollection(
+    id: string,
+): Promise<{ id: string; title: string; descriptionHtml: string } | null> {
+    const { collection } = await graphql<{
+        collection: { id: string; title: string; descriptionHtml: string } | null;
+    }>(COLLECTION_QUERY, { id });
+    return collection;
+}
+
+let onlineStoreId: string | undefined;
+
+// Makes a product or collection visible on the Online Store sales channel.
+export async function publishToOnlineStore(id: string): Promise<void> {
+    if (!onlineStoreId) {
+        const { publications } = await graphql<{
+            publications: {
+                nodes: { id: string; catalog: { apps?: { nodes: { handle: string }[] } } | null }[];
+            };
+        }>(PUBLICATIONS_QUERY);
+        onlineStoreId = publications.nodes.find(
+            (p) => p.catalog?.apps?.nodes[0]?.handle === "online_store",
+        )?.id;
+        if (!onlineStoreId) throw new Error("Shopify has no Online Store sales channel.");
+    }
+
+    const { publishablePublish } = await graphql<{ publishablePublish: UserErrorsResult }>(
+        PUBLISHABLE_PUBLISH,
+        { id, input: [{ publicationId: onlineStoreId }] },
+    );
+    throwUserErrors("Could not publish to the Online Store", publishablePublish.userErrors);
 }

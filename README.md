@@ -2,7 +2,7 @@
 
 Migrates products from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, and quantities. Products are created as drafts. Categories are not migrated yet.
+For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, and categories as collections. Products are created as drafts.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ For now it migrates one product at a time with its basic details, images, varian
   read_products,write_products,read_files,write_files,read_inventory,write_inventory,read_locations,read_publications,write_publications,read_online_store_navigation,write_online_store_navigation
   ```
 
-  Products, files, inventory and locations are used now; the others are for upcoming features (sales channels, URL redirects). The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
+  Products, files, inventory, locations and publications are used now; the navigation scopes are for upcoming features (menus, URL redirects). The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
 
 ## Setup
 
@@ -79,6 +79,7 @@ npm run typecheck                # type-check without running
    - **Price:** unchanged, rounded to 2 decimals. A variant's price is the product price plus (or minus) its option values' price modifiers.
    - **Special price:** the special that OpenCart applies right now for the default customer group (start date empty or past, end date empty or future; lowest priority, then lowest price) becomes the sale price, and the normal price becomes the compare-at price, which themes show crossed out. Without a special, the compare-at price is cleared. Shopify can't schedule price changes, so a special with an end date gives a warning to run `--update` after it ends, and a future special is applied by an `--update` after it starts. Specials for other customer groups and quantity discounts (`product_discount`) are not migrated; each one gives a warning.
    - **Tax:** a product is taxable ("Charge tax on this product") when its OpenCart tax class has at least one tax rule. OpenCart stores prices excluding tax, so they're sent unchanged when Shopify's "All prices include tax" setting is off. When it's on, `PRICE_TAX_RATE` is added (e.g. 100.00 at 20% → 120.00), so customers pay the same total; without `PRICE_TAX_RATE` the run stops. Tax rates themselves aren't product data in Shopify: set them up in Shopify's tax settings. Fixed tax amounts (e.g. an eco tax) have no Shopify equivalent and give a warning.
+   - **Categories:** each of the product's OpenCart categories becomes a manual Shopify collection, created the first time a product in it is migrated (empty categories are never created). Title, description (cleaned, images moved to Shopify Files) and image come from the category, and the handle from its SEO keyword, like products. Collections of enabled categories are published to the Online Store. Shopify collections can't be nested, so the category tree isn't kept. Each collection is remembered in `migration.sqlite`.
    - **Variants:** select and radio options (up to 3, Shopify's limit) become Shopify options, and every combination of their values becomes a variant. Products without them get Shopify's single `Default Title` variant. Other option types (checkbox, text, textarea, date, time, date & time, file) are customer inputs with no standard Shopify equivalent: they are skipped with a warning, which also says when the option was required.
    - **Stock:** OpenCart's "Subtract Stock" becomes Shopify's "Track quantity". For tracked products, the quantity becomes the available quantity at `SHOPIFY_LOCATION_ID`. OpenCart tracks stock per product and per option value, not per combination, so a variant gets the lowest quantity that OpenCart tracks for it (the product's and each chosen value's). OpenCart's "allow checkout when out of stock" store setting becomes "Continue selling when out of stock". OpenCart's stock status text ("2-3 Days", "Pre-Order") and minimum order quantity have no Shopify equivalent and are not migrated.
    - **Description clean-up:** the HTML is tidied to match what Shopify's editor produces: HTML comments and `class` attributes are removed, `<font>` tags are removed (their text is kept, so the theme's font is used), `<b>`/`<i>` become `<strong>`/`<em>`, and line breaks and tabs are collapsed. The visible text doesn't change.
@@ -86,7 +87,7 @@ npm run typecheck                # type-check without running
 4. Finds the product's images in `OPENCART_IMAGE_DIR`: the main image first, then the additional images by sort order. Missing files are skipped with a warning.
 5. With `--dry-run`, prints the converted product and the images it found, then stops. Shopify is not called and nothing is uploaded or saved.
 6. Uploads each image to Shopify (staged upload). A failed upload is skipped with a warning.
-7. Creates the product with its images in one `productSet` call.
+7. Creates the product with its images and collections in one `productSet` call.
 8. Saves the OpenCart → Shopify ID mapping in `migration.sqlite`, then prints the admin link.
 9. Waits up to a minute for Shopify to process the images and prints each one's status (`READY` or `FAILED`).
 
@@ -100,12 +101,12 @@ OpenCart is the source of truth: the title, description, variants, prices, SKUs 
 2. Matches each variant to the Shopify variant with the same option values. Matched variants keep their Shopify ID. New combinations are created, and Shopify variants that no longer exist in OpenCart are deleted.
 3. Prints each difference, e.g. `variant "Medium": price 99.00 → 110.00`. If nothing differs, it says the product is up to date and doesn't call Shopify. Whitespace between HTML tags is ignored when comparing descriptions, because Shopify reformats HTML when saving it.
 4. With `--dry-run`, stops after printing the differences.
-5. Updates the product and its variants with `productSet`.
+5. Updates the product, its variants and its collections with `productSet`. Only collections created from OpenCart categories are added or removed; collections a product was added to by hand in Shopify (e.g. the home page) are kept. The title and description of existing collections are updated from their categories too.
 6. Sets the available quantity of each changed existing variant with `inventorySetQuantities`, passing the quantity it just read as `changeFromQuantity`. If the stock changed in Shopify in the meantime (e.g. a sale), Shopify refuses instead of overwriting it. If the item isn't stocked at the location yet, it is activated there.
 
 The handle, status and gallery images are not changed, so product URLs stay the same and a product you have activated in Shopify stays active. Changes to the gallery images in OpenCart are not synced; images inside the description are.
 
-`migration.sqlite` records which products and description images have been migrated, so don't delete it. It is gitignored.
+`migration.sqlite` records which products, categories and description images have been migrated, so don't delete it. It is gitignored.
 
 ## Project structure
 
@@ -117,6 +118,7 @@ src/
   opencart.ts  Database connection and product queries
   convert.ts   OpenCart product → Shopify productSet input, handle building
   shopify.ts   Access token, graphql() helper and product creation
+  collections.ts  OpenCart categories → Shopify collections
   description.ts  Images inside descriptions → Shopify Files
   mapping.ts   SQLite mapping of migrated products and files
 ```

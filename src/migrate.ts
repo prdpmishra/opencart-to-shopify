@@ -8,12 +8,14 @@ import {
     getProduct,
     getProductImages,
     getPriceRules,
+    getProductCategories,
     getProductOptions,
     type FullProduct,
 } from "./opencart.ts";
-import { toProductSetInput, type ProductSetInput } from "./convert.ts";
+import { sameHtml, toProductSetInput, type ProductSetInput } from "./convert.ts";
+import { prepareCollections, type ProductCollection } from "./collections.ts";
 import { rewriteDescriptionImages } from "./description.ts";
-import { findMapping, saveMapping } from "./mapping.ts";
+import { findMapping, isMappedShopifyId, saveMapping } from "./mapping.ts";
 import {
     adminProductUrl,
     getShopTaxesIncluded,
@@ -121,8 +123,18 @@ async function main() {
         // Before comparing or sending, so the description has Shopify image URLs.
         input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
 
-        if (existing) await updateProduct(id, existing.shopify_id, input, locationId, dryRun);
-        else await createProduct(connection, product, input, dryRun);
+        // Each category becomes a collection; missing ones are created first.
+        const collections = await prepareCollections(
+            await getProductCategories(connection, id),
+            dryRun,
+        );
+
+        if (existing)
+            await updateProduct(id, existing.shopify_id, input, collections, locationId, dryRun);
+        else {
+            input.collections = collections.flatMap((c) => (c.id ? [c.id] : []));
+            await createProduct(connection, product, input, dryRun);
+        }
     } catch (error) {
         console.error(
             "Something went wrong:",
@@ -219,13 +231,6 @@ async function createProduct(
     }
 }
 
-// Shopify reformats HTML when saving it, e.g. it puts a newline between </p><p>.
-// Whitespace between tags doesn't change the page, so it's ignored here.
-function sameHtml(a: string, b: string): boolean {
-    const normalise = (html: string) => html.replace(/>\s+</g, "><");
-    return normalise(a) === normalise(b);
-}
-
 // Identifies a variant by its option values, e.g. "Color=Red|Size=Small".
 // Sorted, so the order of the options doesn't matter.
 function variantKey(options: { name: string; value: string }[]): string {
@@ -241,6 +246,7 @@ async function updateProduct(
     id: number,
     shopifyId: string,
     input: ProductSetInput,
+    collections: ProductCollection[],
     locationId: string,
     dryRun: boolean,
 ) {
@@ -319,6 +325,23 @@ async function updateProduct(
         productChanged = true;
     }
 
+    // Collections: only those created from OpenCart categories are added or removed.
+    // Collections added by hand in Shopify (e.g. the home page) are kept.
+    const currentIds = new Set(current.collections.map((c) => c.id));
+    const wantedIds = new Set(collections.flatMap((c) => (c.id ? [c.id] : [])));
+    const added = collections.filter((c) => !c.id || !currentIds.has(c.id)).map((c) => `+ ${c.title}`);
+    const removed = current.collections
+        .filter((c) => !wantedIds.has(c.id) && isMappedShopifyId("category", c.id))
+        .map((c) => `− ${c.title}`);
+    let collectionIds: string[] | undefined;
+    if (added.length > 0 || removed.length > 0) {
+        changes.push(`collections: ${[...added, ...removed].join(", ")}`);
+        // productSet replaces the whole list, so send the ones we keep as well.
+        const kept = current.collections.filter((c) => !isMappedShopifyId("category", c.id));
+        collectionIds = [...kept.map((c) => c.id), ...wantedIds];
+        productChanged = true;
+    }
+
     if (changes.length === 0) {
         console.log(`Product ${id} is already up to date in Shopify (${shopifyId}). Nothing to do.`);
         return;
@@ -331,17 +354,18 @@ async function updateProduct(
         return;
     }
 
-    if (productChanged)
-        // No handle, status or files, so Shopify keeps them.
-        await saveProduct(
-            {
-                title: input.title,
-                descriptionHtml: input.descriptionHtml,
-                productOptions: input.productOptions,
-                variants,
-            },
-            shopifyId,
-        );
+    if (productChanged) {
+        // No handle, status or files, so Shopify keeps them. Collections are only
+        // sent when they changed; left out, Shopify keeps the current ones.
+        const updateInput: ProductSetInput = {
+            title: input.title,
+            descriptionHtml: input.descriptionHtml,
+            productOptions: input.productOptions,
+            variants,
+        };
+        if (collectionIds) updateInput.collections = collectionIds;
+        await saveProduct(updateInput, shopifyId);
+    }
 
     for (const { variant, quantity } of quantityUpdates)
         await setAvailableQuantity(variant.inventoryItemId, locationId, quantity, variant.available);
