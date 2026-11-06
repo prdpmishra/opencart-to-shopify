@@ -43,13 +43,16 @@ export async function syncDiscounts(
 
         const mapping = mappings.find((m) => m.quantity === tier.quantity);
         const current = mapping ? await getAutomaticDiscount(mapping.shopify_id) : null;
+        // Without a start date the tier applies straight away. An existing discount
+        // that has already started keeps its start, so it doesn't count as a change;
+        // one scheduled for later (the start date was removed in OpenCart) starts now.
+        const now = new Date();
+        const started = current && new Date(current.startsAt) <= now ? current.startsAt : null;
         const discount: AutomaticDiscount = {
             title: `Buy ${tier.quantity}+, save ${money.format(amount)} each`,
             amount: amount.toFixed(2),
             minimumQuantity: tier.quantity,
-            // Without a start date the tier applies straight away; an existing
-            // discount keeps its start, so it doesn't count as a change.
-            startsAt: tier.startsAt?.toISOString() ?? current?.startsAt ?? new Date().toISOString(),
+            startsAt: tier.startsAt?.toISOString() ?? started ?? now.toISOString(),
             endsAt: tier.endsAt?.toISOString() ?? null,
         };
 
