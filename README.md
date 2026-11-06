@@ -2,7 +2,7 @@
 
 Migrates products from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, and categories as collections. Products are created as drafts.
+For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, status, SEO, vendor, tags and weight. Enabled products become active and are published to the Online Store; disabled ones become drafts.
 
 ## Requirements
 
@@ -62,7 +62,7 @@ PRICE_TAX_RATE=
 
 ```sh
 npm run migrate -- 48 --dry-run  # show what would be sent for OpenCart product 48
-npm run migrate -- 48            # create it in Shopify as a draft
+npm run migrate -- 48            # create it in Shopify
 npm run migrate -- 48 --update --dry-run  # show what would change in Shopify
 npm run migrate -- 48 --update   # update the migrated product from OpenCart
 npm start                        # list OpenCart and Shopify products
@@ -79,6 +79,9 @@ npm run typecheck                # type-check without running
    - **Price:** unchanged, rounded to 2 decimals. A variant's price is the product price plus (or minus) its option values' price modifiers.
    - **Special price:** the special that OpenCart applies right now for the default customer group (start date empty or past, end date empty or future; lowest priority, then lowest price) becomes the sale price, and the normal price becomes the compare-at price, which themes show crossed out. Without a special, the compare-at price is cleared. Shopify can't schedule price changes, so a special with an end date gives a warning to run `--update` after it ends, and a future special is applied by an `--update` after it starts. Specials for other customer groups and quantity discounts (`product_discount`) are not migrated; each one gives a warning.
    - **Tax:** a product is taxable ("Charge tax on this product") when its OpenCart tax class has at least one tax rule. OpenCart stores prices excluding tax, so they're sent unchanged when Shopify's "All prices include tax" setting is off. When it's on, `PRICE_TAX_RATE` is added (e.g. 100.00 at 20% → 120.00), so customers pay the same total; without `PRICE_TAX_RATE` the run stops. Tax rates themselves aren't product data in Shopify: set them up in Shopify's tax settings. Fixed tax amounts (e.g. an eco tax) have no Shopify equivalent and give a warning.
+   - **Status:** enabled products whose "Date Available" has passed become `ACTIVE` and are published to the Online Store (Shopify doesn't publish active products by itself). Disabled products, and products available from a future date, become `DRAFT`; run `--update` after that date.
+   - **SEO, vendor, tags:** the meta title and meta description become Shopify's SEO title and description (tabs and extra spaces removed; empty ones fall back to the product title and description). The manufacturer becomes the vendor, and OpenCart's comma-separated tags become Shopify tags. Meta keywords have no Shopify equivalent and are skipped.
+   - **Weight and shipping:** a variant's weight is the product weight plus its option values' weights, in the product's unit (kg, g, lb or oz; another unit gives a warning). OpenCart's "Requires Shipping" becomes "This is a physical product". Length, width and height have no Shopify product field (parcel sizes are shipping packages) and give a warning.
    - **Categories:** each of the product's OpenCart categories becomes a manual Shopify collection, created the first time a product in it is migrated (empty categories are never created). Title, description (cleaned, images moved to Shopify Files) and image come from the category, and the handle from its SEO keyword, like products. Collections of enabled categories are published to the Online Store. Shopify collections can't be nested, so the category tree isn't kept. Each collection is remembered in `migration.sqlite`.
    - **Variants:** select and radio options (up to 3, Shopify's limit) become Shopify options, and every combination of their values becomes a variant. Products without them get Shopify's single `Default Title` variant. Other option types (checkbox, text, textarea, date, time, date & time, file) are customer inputs with no standard Shopify equivalent: they are skipped with a warning, which also says when the option was required.
    - **Stock:** OpenCart's "Subtract Stock" becomes Shopify's "Track quantity". For tracked products, the quantity becomes the available quantity at `SHOPIFY_LOCATION_ID`. OpenCart tracks stock per product and per option value, not per combination, so a variant gets the lowest quantity that OpenCart tracks for it (the product's and each chosen value's). OpenCart's "allow checkout when out of stock" store setting becomes "Continue selling when out of stock". OpenCart's stock status text ("2-3 Days", "Pre-Order") and minimum order quantity have no Shopify equivalent and are not migrated.
@@ -87,13 +90,13 @@ npm run typecheck                # type-check without running
 4. Finds the product's images in `OPENCART_IMAGE_DIR`: the main image first, then the additional images by sort order. Missing files are skipped with a warning.
 5. With `--dry-run`, prints the converted product and the images it found, then stops. Shopify is not called and nothing is uploaded or saved.
 6. Uploads each image to Shopify (staged upload). A failed upload is skipped with a warning.
-7. Creates the product with its images and collections in one `productSet` call.
+7. Creates the product with its images and collections in one `productSet` call, then publishes it to the Online Store if it's active.
 8. Saves the OpenCart → Shopify ID mapping in `migration.sqlite`, then prints the admin link.
 9. Waits up to a minute for Shopify to process the images and prints each one's status (`READY` or `FAILED`).
 
 ### Updating a migrated product (`--update`)
 
-OpenCart is the source of truth: the title, description, variants, prices, SKUs and stock in Shopify are overwritten with OpenCart's values.
+OpenCart is the source of truth: the title, description, status, SEO, vendor, tags, variants, prices, SKUs, weights and stock in Shopify are overwritten with OpenCart's values. An active product that isn't on the Online Store yet is published.
 
 > **Note:** this includes the available quantity. That's right while OpenCart is the live shop, but once Shopify takes orders, `--update` would overwrite stock that Shopify has reduced.
 
@@ -104,7 +107,7 @@ OpenCart is the source of truth: the title, description, variants, prices, SKUs 
 5. Updates the product, its variants and its collections with `productSet`. Only collections created from OpenCart categories are added or removed; collections a product was added to by hand in Shopify (e.g. the home page) are kept. The title and description of existing collections are updated from their categories too.
 6. Sets the available quantity of each changed existing variant with `inventorySetQuantities`, passing the quantity it just read as `changeFromQuantity`. If the stock changed in Shopify in the meantime (e.g. a sale), Shopify refuses instead of overwriting it. If the item isn't stocked at the location yet, it is activated there.
 
-The handle, status and gallery images are not changed, so product URLs stay the same and a product you have activated in Shopify stays active. Changes to the gallery images in OpenCart are not synced; images inside the description are.
+The handle and gallery images are not changed, so product URLs stay the same. Status does follow OpenCart: a product disabled in OpenCart becomes a draft in Shopify. Changes to the gallery images in OpenCart are not synced; images inside the description are.
 
 `migration.sqlite` records which products, categories and description images have been migrated, so don't delete it. It is gitignored.
 

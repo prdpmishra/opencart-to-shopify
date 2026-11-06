@@ -161,6 +161,11 @@ export interface ShopifyProduct {
     descriptionHtml: string;
     handle: string;
     status: string;
+    seo: { title: string | null; description: string | null };
+    vendor: string;
+    tags: string[];
+    /** Whether the product is published to the Online Store sales channel. */
+    onlineStore: boolean;
     variants: ShopifyVariant[];
     collections: { id: string; title: string }[];
 }
@@ -176,6 +181,8 @@ export interface ShopifyVariant {
     inventoryPolicy: string;
     inventoryItemId: string;
     tracked: boolean;
+    requiresShipping: boolean;
+    weight: { value: number; unit: string } | null;
     /** Available quantity at the location, or null if the item isn't stocked there. */
     available: number | null;
 }
@@ -187,6 +194,10 @@ interface ProductQueryResult {
         descriptionHtml: string;
         handle: string;
         status: string;
+        seo: { title: string | null; description: string | null };
+        vendor: string;
+        tags: string[];
+        onlineStore: boolean;
         collections: { pageInfo: { hasNextPage: boolean }; nodes: { id: string; title: string }[] };
         variants: {
             pageInfo: { hasNextPage: boolean };
@@ -201,6 +212,8 @@ interface ProductQueryResult {
                 inventoryItem: {
                     id: string;
                     tracked: boolean;
+                    requiresShipping: boolean;
+                    measurement: { weight: { value: number; unit: string } | null };
                     inventoryLevel: { quantities: { name: string; quantity: number }[] } | null;
                 };
             }[];
@@ -209,13 +222,20 @@ interface ProductQueryResult {
 }
 
 const PRODUCT_QUERY = `
-    query GetProduct($id: ID!, $locationId: ID!) {
+    query GetProduct($id: ID!, $locationId: ID!, $publicationId: ID!) {
         product(id: $id) {
             id
             title
             descriptionHtml
             handle
             status
+            seo {
+                title
+                description
+            }
+            vendor
+            tags
+            onlineStore: publishedOnPublication(publicationId: $publicationId)
             collections(first: 250) {
                 pageInfo {
                     hasNextPage
@@ -243,6 +263,13 @@ const PRODUCT_QUERY = `
                     inventoryItem {
                         id
                         tracked
+                        requiresShipping
+                        measurement {
+                            weight {
+                                value
+                                unit
+                            }
+                        }
                         inventoryLevel(locationId: $locationId) {
                             quantities(names: ["available"]) {
                                 name
@@ -264,6 +291,7 @@ export async function getShopifyProduct(
     const { product } = await graphql<ProductQueryResult>(PRODUCT_QUERY, {
         id: productId,
         locationId,
+        publicationId: await getOnlineStorePublicationId(),
     });
     if (!product) return null;
 
@@ -287,6 +315,8 @@ export async function getShopifyProduct(
             inventoryPolicy: v.inventoryPolicy,
             inventoryItemId: v.inventoryItem.id,
             tracked: v.inventoryItem.tracked,
+            requiresShipping: v.inventoryItem.requiresShipping,
+            weight: v.inventoryItem.measurement.weight,
             available: v.inventoryItem.inventoryLevel?.quantities[0]?.quantity ?? null,
         })),
     };
@@ -717,8 +747,8 @@ export async function getCollection(
 
 let onlineStoreId: string | undefined;
 
-// Makes a product or collection visible on the Online Store sales channel.
-export async function publishToOnlineStore(id: string): Promise<void> {
+// The ID of the Online Store sales channel's publication (looked up once).
+export async function getOnlineStorePublicationId(): Promise<string> {
     if (!onlineStoreId) {
         const { publications } = await graphql<{
             publications: {
@@ -730,10 +760,15 @@ export async function publishToOnlineStore(id: string): Promise<void> {
         )?.id;
         if (!onlineStoreId) throw new Error("Shopify has no Online Store sales channel.");
     }
+    return onlineStoreId;
+}
 
+// Makes a product or collection visible on the Online Store sales channel.
+export async function publishToOnlineStore(id: string): Promise<void> {
+    const publicationId = await getOnlineStorePublicationId();
     const { publishablePublish } = await graphql<{ publishablePublish: UserErrorsResult }>(
         PUBLISHABLE_PUBLISH,
-        { id, input: [{ publicationId: onlineStoreId }] },
+        { id, input: [{ publicationId }] },
     );
     throwUserErrors("Could not publish to the Online Store", publishablePublish.userErrors);
 }

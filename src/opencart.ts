@@ -38,6 +38,18 @@ interface FullProductRow extends RowDataPacket {
     tax_class_exists: number;
     has_tax_rules: number;
     has_fixed_tax: number;
+    status: number;
+    available_later: number;
+    meta_title: string | null;
+    meta_description: string | null;
+    tag: string | null;
+    manufacturer: string | null;
+    weight: string;
+    weight_unit: string | null;
+    length: string;
+    width: string;
+    height: string;
+    shipping: number;
 }
 
 export interface FullProduct {
@@ -61,6 +73,19 @@ export interface FullProduct {
     taxable: boolean;
     /** Whether the tax class includes a fixed amount (e.g. an eco tax). */
     hasFixedTax: boolean;
+    enabled: boolean;
+    /** OpenCart hides a product until its "Date Available"; true while that's in the future. */
+    availableLater: boolean;
+    metaTitle: string;
+    metaDescription: string;
+    /** Comma-separated in OpenCart, e.g. "iPhone, Apple, smartphone". */
+    tags: string[];
+    manufacturer: string | null;
+    weight: number;
+    /** The weight class's unit, e.g. "kg", "g", "lb", "oz". */
+    weightUnit: string | null;
+    hasDimensions: boolean;
+    requiresShipping: boolean;
 }
 
 function getSettings() {
@@ -91,14 +116,20 @@ export async function getProduct(
                 JOIN \`${dbPrefix}tax_rate\` tr ON tr.tax_rate_id = trl.tax_rate_id
                 WHERE trl.tax_class_id = p.tax_class_id AND tr.type = 'F') AS has_fixed_tax,
             (SELECT value FROM \`${dbPrefix}setting\`
-                WHERE store_id = 0 AND \`key\` = 'config_stock_checkout') AS stock_checkout
+                WHERE store_id = 0 AND \`key\` = 'config_stock_checkout') AS stock_checkout,
+            p.status, p.shipping, p.weight, wcd.unit AS weight_unit, p.length, p.width, p.height,
+            (p.date_available <> '0000-00-00' AND p.date_available > NOW()) AS available_later,
+            pd.meta_title, pd.meta_description, pd.tag, m.name AS manufacturer
         FROM \`${dbPrefix}product\` p
         LEFT JOIN \`${dbPrefix}product_description\` pd
             ON pd.product_id = p.product_id AND pd.language_id = ?
         LEFT JOIN \`${dbPrefix}seo_url\` su
             ON su.query = CONCAT('product_id=', p.product_id) AND su.store_id = 0 AND su.language_id = ?
+        LEFT JOIN \`${dbPrefix}weight_class_description\` wcd
+            ON wcd.weight_class_id = p.weight_class_id AND wcd.language_id = ?
+        LEFT JOIN \`${dbPrefix}manufacturer\` m ON m.manufacturer_id = p.manufacturer_id
         WHERE p.product_id = ?`,
-        [languageId, languageId, id],
+        [languageId, languageId, languageId, id],
     );
 
     const row = results[0];
@@ -119,6 +150,19 @@ export async function getProduct(
         taxClassExists: row.tax_class_exists === 1,
         taxable: row.has_tax_rules === 1,
         hasFixedTax: row.has_fixed_tax === 1,
+        enabled: row.status === 1,
+        availableLater: row.available_later === 1,
+        metaTitle: decode(row.meta_title ?? ""),
+        metaDescription: decode(row.meta_description ?? ""),
+        tags: decode(row.tag ?? "")
+            .split(",")
+            .map((t) => t.trim())
+            .filter((t) => t !== ""),
+        manufacturer: row.manufacturer ? decode(row.manufacturer) : null,
+        weight: Number(row.weight),
+        weightUnit: row.weight_unit?.trim() || null,
+        hasDimensions: [row.length, row.width, row.height].some((d) => Number(d) !== 0),
+        requiresShipping: row.shipping === 1,
     };
 }
 
@@ -178,6 +222,8 @@ export interface OptionValue {
     name: string;
     /** Added to the product price; negative for OpenCart's "-" prefix. */
     priceModifier: number;
+    /** Added to the product weight (same unit); negative for OpenCart's "-" prefix. */
+    weightModifier: number;
     quantity: number;
     /** OpenCart's "Subtract Stock" for this value. */
     subtractStock: boolean;
@@ -206,6 +252,8 @@ interface OptionValueRow extends RowDataPacket {
     name: string;
     price: string;
     price_prefix: string;
+    weight: string;
+    weight_prefix: string;
     quantity: number;
     subtract: number;
 }
@@ -230,7 +278,7 @@ export async function getProductOptions(
     );
 
     const [valueRows] = await connection.execute<OptionValueRow[]>(
-        `SELECT pov.product_option_id, ovd.name, pov.price, pov.price_prefix, pov.quantity, pov.subtract
+        `SELECT pov.product_option_id, ovd.name, pov.price, pov.price_prefix, pov.weight, pov.weight_prefix, pov.quantity, pov.subtract
         FROM \`${dbPrefix}product_option_value\` pov
         JOIN \`${dbPrefix}option_value\` ov ON ov.option_value_id = pov.option_value_id
         LEFT JOIN \`${dbPrefix}option_value_description\` ovd
@@ -255,6 +303,7 @@ export async function getProductOptions(
             .map((v) => ({
                 name: decode(v.name ?? ""),
                 priceModifier: Number(v.price) * (v.price_prefix === "-" ? -1 : 1),
+                weightModifier: Number(v.weight) * (v.weight_prefix === "-" ? -1 : 1),
                 quantity: v.quantity,
                 subtractStock: v.subtract === 1,
             }));

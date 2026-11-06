@@ -12,7 +12,7 @@ import {
     getProductOptions,
     type FullProduct,
 } from "./opencart.ts";
-import { sameHtml, toProductSetInput, type ProductSetInput } from "./convert.ts";
+import { sameHtml, shopifyWeightUnit, toProductSetInput, type ProductSetInput } from "./convert.ts";
 import { prepareCollections, type ProductCollection } from "./collections.ts";
 import { rewriteDescriptionImages } from "./description.ts";
 import { findMapping, isMappedShopifyId, saveMapping } from "./mapping.ts";
@@ -20,6 +20,7 @@ import {
     adminProductUrl,
     getShopTaxesIncluded,
     getShopifyProduct,
+    publishToOnlineStore,
     saveProduct,
     setAvailableQuantity,
     type ShopifyVariant,
@@ -117,6 +118,23 @@ async function main() {
                 `Warning: product ${id}: its tax class includes a fixed tax amount (e.g. an eco tax), ` +
                     "which Shopify has no equivalent for. It is not migrated.",
             );
+        if (product.weight !== 0 && !shopifyWeightUnit(product.weightUnit))
+            console.warn(
+                `Warning: product ${id}: weight unit "${product.weightUnit ?? "none"}" has no Shopify equivalent ` +
+                    "(kg, g, lb or oz), so the weight is not migrated.",
+            );
+        if (product.hasDimensions)
+            console.warn(
+                `Warning: product ${id}: length, width and height are not migrated. ` +
+                    "Shopify products have no dimensions; parcel sizes are set as shipping packages.",
+            );
+        if (!product.enabled)
+            console.log(`Product ${id} is disabled in OpenCart, so it becomes a draft in Shopify.`);
+        else if (product.availableLater)
+            console.log(
+                `Product ${id}'s "Date Available" is in the future, so it becomes a draft in Shopify. ` +
+                    "Run --update after that date to make it active.",
+            );
 
         const input = toProductSetInput(product, locationId, options, special, priceTaxRate);
 
@@ -208,8 +226,11 @@ async function createProduct(
         );
     }
 
+    // Active products aren't visible until they are published to a sales channel.
+    if (input.status === "ACTIVE") await publishToOnlineStore(created.id);
+
     console.log(
-        `Created product ${id} in Shopify as a draft: ${created.id}\n` +
+        `Created product ${id} in Shopify (${input.status === "ACTIVE" ? "active, on the Online Store" : "draft"}): ${created.id}\n` +
             `  handle: ${created.handle}, ${input.variants.length} variant(s)\n` +
             `  ${adminProductUrl(created.id)}`,
     );
@@ -229,6 +250,15 @@ async function createProduct(
         if (ready < uploaded.length)
             console.warn(`Warning: only ${ready} of ${uploaded.length} image(s) are ready. Check the product in Shopify admin.`);
     }
+}
+
+// A weight of 0 is the same in any unit; otherwise unit and value must match.
+function sameWeight(
+    current: { value: number; unit: string } | null,
+    wanted: { value: number; unit: string },
+): boolean {
+    if ((current?.value ?? 0) === 0 && wanted.value === 0) return true;
+    return current?.unit === wanted.unit && Math.abs(current.value - wanted.value) < 1e-6;
 }
 
 // Identifies a variant by its option values, e.g. "Color=Red|Size=Small".
@@ -264,7 +294,21 @@ async function updateProduct(
         changes.push(
             `description: changed (${current.descriptionHtml.length} → ${input.descriptionHtml.length} characters)`,
         );
+    if (current.status !== input.status)
+        changes.push(`status: ${current.status} → ${input.status}`);
+    if ((current.seo.title ?? "") !== input.seo.title)
+        changes.push(`SEO title: "${current.seo.title ?? ""}" → "${input.seo.title}"`);
+    if ((current.seo.description ?? "") !== input.seo.description)
+        changes.push(`SEO description: changed`);
+    if (input.vendor !== undefined && current.vendor !== input.vendor)
+        changes.push(`vendor: "${current.vendor}" → "${input.vendor}"`);
+    if ([...current.tags].sort().join(",") !== [...input.tags].sort().join(","))
+        changes.push(`tags: [${current.tags.join(", ")}] → [${input.tags.join(", ")}]`);
     let productChanged = changes.length > 0;
+
+    // Active products must also be published to the Online Store to be visible.
+    const publish = input.status === "ACTIVE" && !current.onlineStore;
+    if (publish) changes.push("Online Store: not published → published");
 
     // Match each OpenCart variant to the Shopify variant with the same option values.
     // Matched variants keep their Shopify ID; unmatched ones are created or deleted.
@@ -306,6 +350,16 @@ async function updateProduct(
             variantChanges.push(`track quantity ${currentVariant.tracked} → ${newVariant.inventoryItem.tracked}`);
         if (currentVariant.inventoryPolicy !== newVariant.inventoryPolicy)
             variantChanges.push(`out-of-stock policy ${currentVariant.inventoryPolicy} → ${newVariant.inventoryPolicy}`);
+        if (currentVariant.requiresShipping !== newVariant.inventoryItem.requiresShipping)
+            variantChanges.push(
+                `physical product ${currentVariant.requiresShipping} → ${newVariant.inventoryItem.requiresShipping}`,
+            );
+        const newWeight = newVariant.inventoryItem.measurement?.weight;
+        if (newWeight && !sameWeight(currentVariant.weight, newWeight))
+            variantChanges.push(
+                `weight ${currentVariant.weight ? `${currentVariant.weight.value} ${currentVariant.weight.unit}` : "none"}` +
+                    ` → ${newWeight.value} ${newWeight.unit}`,
+            );
         if (variantChanges.length > 0) productChanged = true;
 
         // The quantity is only set for tracked items (see toProductSetInput).
@@ -355,20 +409,18 @@ async function updateProduct(
     }
 
     if (productChanged) {
-        // No handle, status or files, so Shopify keeps them. Collections are only
+        // No handle or files, so Shopify keeps them. Collections are only
         // sent when they changed; left out, Shopify keeps the current ones.
-        const updateInput: ProductSetInput = {
-            title: input.title,
-            descriptionHtml: input.descriptionHtml,
-            productOptions: input.productOptions,
-            variants,
-        };
+        const { handle, files, collections: _, ...fields } = input;
+        const updateInput: ProductSetInput = { ...fields, variants };
         if (collectionIds) updateInput.collections = collectionIds;
         await saveProduct(updateInput, shopifyId);
     }
 
     for (const { variant, quantity } of quantityUpdates)
         await setAvailableQuantity(variant.inventoryItemId, locationId, quantity, variant.available);
+
+    if (publish) await publishToOnlineStore(shopifyId);
 
     console.log(`Updated product ${id} in Shopify: ${shopifyId}\n  ${adminProductUrl(shopifyId)}`);
 }

@@ -1,12 +1,25 @@
 import type { FullProduct, OptionValue, ProductOption, Special } from "./opencart.ts";
 
+export type WeightUnit = "KILOGRAMS" | "GRAMS" | "POUNDS" | "OUNCES";
+
+// OpenCart weight class units → Shopify weight units.
+const WEIGHT_UNITS: Record<string, WeightUnit> = {
+    kg: "KILOGRAMS",
+    g: "GRAMS",
+    lb: "POUNDS",
+    oz: "OUNCES",
+};
+
 // The parts of Shopify's ProductSetInput that we fill in.
-// handle and status are left out when updating, so Shopify keeps its values.
+// The handle is left out when updating, so Shopify keeps it.
 export interface ProductSetInput {
     title: string;
     descriptionHtml: string;
     handle?: string;
-    status?: "DRAFT";
+    status: "ACTIVE" | "DRAFT";
+    seo: { title: string; description: string };
+    vendor?: string;
+    tags: string[];
     productOptions: { name: string; values: { name: string }[] }[];
     variants: {
         id?: string; // set when updating, so the existing variant is kept
@@ -16,7 +29,11 @@ export interface ProductSetInput {
         compareAtPrice: string | null;
         sku?: string;
         taxable: boolean; // Shopify's "Charge tax on this product"
-        inventoryItem: { tracked: boolean };
+        inventoryItem: {
+            tracked: boolean;
+            requiresShipping: boolean; // Shopify's "This is a physical product"
+            measurement?: { weight: { value: number; unit: WeightUnit } };
+        };
         inventoryPolicy: "DENY" | "CONTINUE";
         // Only used when creating; updates set the quantity with inventorySetQuantities.
         inventoryQuantities?: { locationId: string; name: "available"; quantity: number }[];
@@ -24,6 +41,15 @@ export interface ProductSetInput {
     // The product's complete list of collections; productSet replaces the existing list.
     collections?: string[];
     files?: { originalSource: string; alt: string; contentType: "IMAGE" }[];
+}
+
+export function shopifyWeightUnit(openCartUnit: string | null): WeightUnit | null {
+    return WEIGHT_UNITS[openCartUnit?.toLowerCase() ?? ""] ?? null;
+}
+
+// Collapses tabs, line breaks and repeated spaces, e.g. "\t HTC Touch HD" → "HTC Touch HD".
+export function tidyText(text: string): string {
+    return text.replace(/\s+/g, " ").trim();
 }
 
 // Rounds to whole cents. Math.round on cents avoids results like 1.005 → 1.00,
@@ -64,6 +90,9 @@ export function toProductSetInput(
         if (new Set(names).size !== names.length)
             throw new Error(`${label}: option "${option.name}" has two values with the same name.`);
     }
+
+    // null for a unit Shopify doesn't have: the weight is then left out (see migrate.ts).
+    const weightUnit = shopifyWeightUnit(product.weightUnit);
 
     const baseSku = product.sku.trim() || product.model.trim();
     if (!product.sku.trim()) {
@@ -114,7 +143,7 @@ export function toProductSetInput(
             price: price.toFixed(2),
             compareAtPrice,
             // OpenCart's "Subtract Stock" is Shopify's "Track quantity".
-            inventoryItem: { tracked },
+            inventoryItem: { tracked, requiresShipping: product.requiresShipping },
             inventoryPolicy: product.allowOutOfStockCheckout ? "CONTINUE" : "DENY",
             taxable: product.taxable,
         };
@@ -132,6 +161,14 @@ export function toProductSetInput(
                 combination.length === 0 ? baseSku : `${baseSku}-${suffix || i + 1}`;
         }
 
+        // OpenCart adds each chosen value's weight to the product weight, in the same unit.
+        if (weightUnit) {
+            const weight = combination.reduce((sum, c) => sum + c.value.weightModifier, product.weight);
+            variant.inventoryItem.measurement = {
+                weight: { value: Math.max(0, Number(weight.toFixed(4))), unit: weightUnit },
+            };
+        }
+
         return variant;
     });
 
@@ -139,7 +176,12 @@ export function toProductSetInput(
         title: product.name,
         descriptionHtml: cleanDescription(product.description),
         handle: buildHandle(product),
-        status: "DRAFT",
+        // OpenCart hides disabled products and products whose "Date Available" is in the future.
+        status: product.enabled && !product.availableLater ? "ACTIVE" : "DRAFT",
+        // Empty clears Shopify's SEO fields, so it falls back to the title and description.
+        seo: { title: tidyText(product.metaTitle), description: tidyText(product.metaDescription) },
+        ...(product.manufacturer ? { vendor: product.manufacturer } : {}),
+        tags: [...new Set(product.tags)],
         productOptions:
             options.length > 0
                 ? options.map((o) => ({ name: o.name, values: o.values.map((v) => ({ name: v.name })) }))
