@@ -7,6 +7,7 @@ import {
     connect,
     getProduct,
     getProductImages,
+    getPriceRules,
     getProductOptions,
     type FullProduct,
 } from "./opencart.ts";
@@ -85,7 +86,16 @@ async function main() {
                     (option.required ? " It is required in OpenCart, but Shopify customers won't be asked for it." : ""),
             );
 
-        const input = toProductSetInput(product, locationId, options);
+        const { special, notMigrated } = await getPriceRules(connection, id);
+        for (const rule of notMigrated)
+            console.warn(`Warning: product ${id}: ${rule} is not migrated.`);
+        if (special?.endDate)
+            console.warn(
+                `Warning: product ${id}: the special price ends on ${special.endDate} in OpenCart, ` +
+                    "but Shopify won't end the sale by itself. Run --update after that date.",
+            );
+
+        const input = toProductSetInput(product, locationId, options, special);
 
         // Before comparing or sending, so the description has Shopify image URLs.
         input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
@@ -257,6 +267,10 @@ async function updateProduct(
         const variantChanges: string[] = [];
         if (currentVariant.price !== newVariant.price)
             variantChanges.push(`price ${currentVariant.price} → ${newVariant.price}`);
+        if (currentVariant.compareAtPrice !== newVariant.compareAtPrice)
+            variantChanges.push(
+                `compare-at ${currentVariant.compareAtPrice ?? "none"} → ${newVariant.compareAtPrice ?? "none"}`,
+            );
         if ((currentVariant.sku ?? "") !== (newVariant.sku ?? ""))
             variantChanges.push(`sku "${currentVariant.sku ?? ""}" → "${newVariant.sku ?? ""}"`);
         if (currentVariant.tracked !== newVariant.inventoryItem.tracked)

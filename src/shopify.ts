@@ -169,6 +169,7 @@ export interface ShopifyVariant {
     /** e.g. [{ name: "Size", value: "Small" }], or [{ name: "Title", value: "Default Title" }] */
     selectedOptions: { name: string; value: string }[];
     price: string;
+    compareAtPrice: string | null;
     sku: string | null;
     inventoryPolicy: string;
     inventoryItemId: string;
@@ -190,6 +191,7 @@ interface ProductQueryResult {
                 id: string;
                 selectedOptions: { name: string; value: string }[];
                 price: string;
+                compareAtPrice: string | null;
                 sku: string | null;
                 inventoryPolicy: string;
                 inventoryItem: {
@@ -221,6 +223,7 @@ const PRODUCT_QUERY = `
                         value
                     }
                     price
+                    compareAtPrice
                     sku
                     inventoryPolicy
                     inventoryItem {
@@ -261,6 +264,7 @@ export async function getShopifyProduct(
             id: v.id,
             selectedOptions: v.selectedOptions,
             price: v.price,
+            compareAtPrice: v.compareAtPrice,
             sku: v.sku,
             inventoryPolicy: v.inventoryPolicy,
             inventoryItemId: v.inventoryItem.id,

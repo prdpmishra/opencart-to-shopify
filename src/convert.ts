@@ -1,4 +1,4 @@
-import type { FullProduct, OptionValue, ProductOption } from "./opencart.ts";
+import type { FullProduct, OptionValue, ProductOption, Special } from "./opencart.ts";
 
 // The parts of Shopify's ProductSetInput that we fill in.
 // handle and status are left out when updating, so Shopify keeps its values.
@@ -12,6 +12,8 @@ export interface ProductSetInput {
         id?: string; // set when updating, so the existing variant is kept
         optionValues: { optionName: string; name: string }[];
         price: string;
+        // The original price during a sale; null clears it when the sale has ended.
+        compareAtPrice: string | null;
         sku?: string;
         inventoryItem: { tracked: boolean };
         inventoryPolicy: "DENY" | "CONTINUE";
@@ -26,10 +28,13 @@ const MAX_OPTIONS = 3;
 
 // options: OpenCart's select/radio options. Each combination of their values
 // becomes a Shopify variant. Without options the product gets one variant.
+// special: OpenCart's active special price. It becomes the sale price, with the
+// normal price as Shopify's compare-at price (shown crossed out).
 export function toProductSetInput(
     product: FullProduct,
     locationId: string,
     options: ProductOption[],
+    special: Special | null,
 ): ProductSetInput {
     const label = `Product ${product.id}`;
 
@@ -71,10 +76,16 @@ export function toProductSetInput(
                 ? combination.map((c) => ({ optionName: c.option, name: c.value.name }))
                 : [{ optionName: "Title", name: "Default Title" }];
 
-        // OpenCart adds each chosen value's price modifier to the product price.
-        const price = combination.reduce((sum, c) => sum + c.value.priceModifier, basePrice);
+        // OpenCart adds each chosen value's price modifier to the product price,
+        // or to the special price when there is one.
+        const modifiers = combination.reduce((sum, c) => sum + c.value.priceModifier, 0);
+        const normalPrice = basePrice + modifiers;
+        const price = (special ? special.price : basePrice) + modifiers;
         if (price < 0)
             throw new Error(`${label}: variant ${optionValues.map((o) => o.name).join(" / ")} has a negative price.`);
+
+        // Shopify only shows a compare-at price that is higher than the price.
+        const compareAtPrice = normalPrice > price ? normalPrice.toFixed(2) : null;
 
         // OpenCart checks every quantity it tracks (the product's and each value's),
         // so the variant can't sell more than the lowest of them.
@@ -87,6 +98,7 @@ export function toProductSetInput(
         const variant: ProductSetInput["variants"][number] = {
             optionValues,
             price: price.toFixed(2),
+            compareAtPrice,
             // OpenCart's "Subtract Stock" is Shopify's "Track quantity".
             inventoryItem: { tracked },
             inventoryPolicy: product.allowOutOfStockCheckout ? "CONTINUE" : "DENY",

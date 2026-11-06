@@ -243,3 +243,77 @@ export async function getProductOptions(
 
     return { options, skipped };
 }
+
+export interface Special {
+    price: number;
+    /** "YYYY-MM-DD", or null when the special has no end date. */
+    endDate: string | null;
+}
+
+interface SpecialRow extends RowDataPacket {
+    price: string;
+    for_default_group: number;
+    started: number;
+    ended: number;
+    date_start: string;
+    date_end: string;
+}
+
+interface DiscountRow extends RowDataPacket {
+    quantity: number;
+    price: string;
+}
+
+// The special price OpenCart shows right now to the default customer group,
+// plus notes about price rules that are not migrated (other groups, future
+// specials, quantity discounts).
+export async function getPriceRules(
+    connection: Connection,
+    id: number,
+): Promise<{ special: Special | null; notMigrated: string[] }> {
+    const { dbPrefix } = getSettings();
+
+    // Dates are compared in SQL: OpenCart stores "no date" as 0000-00-00,
+    // which isn't a valid JavaScript date.
+    const [specials] = await connection.execute<SpecialRow[]>(
+        `SELECT ps.price,
+            ps.customer_group_id = (SELECT value FROM \`${dbPrefix}setting\`
+                WHERE store_id = 0 AND \`key\` = 'config_customer_group_id') AS for_default_group,
+            (ps.date_start = '0000-00-00' OR ps.date_start < NOW()) AS started,
+            (ps.date_end <> '0000-00-00' AND ps.date_end <= NOW()) AS ended,
+            CAST(ps.date_start AS CHAR) AS date_start,
+            CAST(ps.date_end AS CHAR) AS date_end
+        FROM \`${dbPrefix}product_special\` ps
+        WHERE ps.product_id = ?
+        ORDER BY ps.priority, ps.price`,
+        [id],
+    );
+
+    const notMigrated: string[] = [];
+    let special: Special | null = null;
+
+    for (const row of specials) {
+        const price = Number(row.price).toFixed(2);
+        if (row.ended) continue; // already over in OpenCart too
+        if (!row.for_default_group)
+            notMigrated.push(`special price ${price} for another customer group`);
+        else if (!row.started)
+            notMigrated.push(`special price ${price} starting ${row.date_start}`);
+        // The first active one wins, as in OpenCart (lowest priority, then lowest price).
+        else if (!special)
+            special = {
+                price: Number(row.price),
+                endDate: row.date_end === "0000-00-00" ? null : row.date_end,
+            };
+    }
+
+    const [discounts] = await connection.execute<DiscountRow[]>(
+        `SELECT quantity, price FROM \`${dbPrefix}product_discount\`
+        WHERE product_id = ? ORDER BY quantity`,
+        [id],
+    );
+    for (const row of discounts)
+        notMigrated.push(`quantity discount: ${row.quantity}+ for ${Number(row.price).toFixed(2)} each`);
+
+    return { special, notMigrated };
+}
