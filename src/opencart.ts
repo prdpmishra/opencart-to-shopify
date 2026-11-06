@@ -40,6 +40,7 @@ interface FullProductRow extends RowDataPacket {
     has_fixed_tax: number;
     status: number;
     available_later: number;
+    in_default_store: number;
     meta_title: string | null;
     meta_description: string | null;
     tag: string | null;
@@ -76,6 +77,8 @@ export interface FullProduct {
     enabled: boolean;
     /** OpenCart hides a product until its "Date Available"; true while that's in the future. */
     availableLater: boolean;
+    /** OpenCart only shows a product in the stores it's assigned to; store 0 is the default one. */
+    inDefaultStore: boolean;
     metaTitle: string;
     metaDescription: string;
     /** Comma-separated in OpenCart, e.g. "iPhone, Apple, smartphone". */
@@ -119,6 +122,8 @@ export async function getProduct(
                 WHERE store_id = 0 AND \`key\` = 'config_stock_checkout') AS stock_checkout,
             p.status, p.shipping, p.weight, wcd.unit AS weight_unit, p.length, p.width, p.height,
             (p.date_available <> '0000-00-00' AND p.date_available > NOW()) AS available_later,
+            EXISTS(SELECT 1 FROM \`${dbPrefix}product_to_store\` p2s
+                WHERE p2s.product_id = p.product_id AND p2s.store_id = 0) AS in_default_store,
             pd.meta_title, pd.meta_description, pd.tag, m.name AS manufacturer
         FROM \`${dbPrefix}product\` p
         LEFT JOIN \`${dbPrefix}product_description\` pd
@@ -152,6 +157,7 @@ export async function getProduct(
         hasFixedTax: row.has_fixed_tax === 1,
         enabled: row.status === 1,
         availableLater: row.available_later === 1,
+        inDefaultStore: row.in_default_store === 1,
         metaTitle: decode(row.meta_title ?? ""),
         metaDescription: decode(row.meta_description ?? ""),
         tags: decode(row.tag ?? "")

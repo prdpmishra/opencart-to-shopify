@@ -200,6 +200,8 @@ async function migrateProduct(
         );
     if (!product.enabled)
         console.log(`Product ${id} is disabled in OpenCart, so it becomes a draft in Shopify.`);
+    else if (!product.inDefaultStore)
+        console.log(`Product ${id} isn't assigned to OpenCart's default store, so it becomes a draft in Shopify.`);
     else if (product.availableLater)
         console.log(
             `Product ${id}'s "Date Available" is in the future, so it becomes a draft in Shopify. ` +
@@ -297,7 +299,7 @@ async function createProduct(
 
     if (uploaded.length > 0) {
         console.log(`Waiting for Shopify to process ${uploaded.length} image(s)...`);
-        const media = await waitForImages(created.id);
+        const media = await waitForImages(created.id, uploaded.length);
 
         // Shopify keeps the order we sent, so media[i] belongs to uploaded[i].
         uploaded.forEach((imagePath, i) => {
@@ -332,8 +334,8 @@ function variantKey(options: { name: string; value: string }[]): string {
         .join("|");
 }
 
-// Updates title, description, variants and inventory from OpenCart.
-// Handle, status and images are left as they are in Shopify.
+// Updates the product from OpenCart: title, description, status, SEO, vendor,
+// tags, collections, variants and inventory. Handle and images are left as they are.
 async function updateProduct(
     id: number,
     shopifyId: string,

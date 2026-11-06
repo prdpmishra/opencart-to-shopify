@@ -123,7 +123,6 @@ interface ProductSetResult {
         product: {
             id: string;
             handle: string;
-            variants: { nodes: { price: string; sku: string | null }[] };
         } | null;
         userErrors: { field: string[] | null; message: string; code: string | null }[];
     };
@@ -132,8 +131,6 @@ interface ProductSetResult {
 export interface SavedProduct {
     id: string;
     handle: string;
-    price: string;
-    sku: string | null;
 }
 
 const PRODUCT_SET = `
@@ -142,12 +139,6 @@ const PRODUCT_SET = `
             product {
                 id
                 handle
-                variants(first: 1) {
-                    nodes {
-                        price
-                        sku
-                    }
-                }
             }
             userErrors {
                 field
@@ -177,17 +168,8 @@ export async function saveProduct(
         throw new Error(`Shopify rejected the product:\n  ${messages.join("\n  ")}`);
     }
 
-    const product = productSet.product;
-    const variant = product?.variants.nodes[0];
-    if (!product || !variant)
-        throw new Error("Shopify returned no product and no errors.");
-
-    return {
-        id: product.id,
-        handle: product.handle,
-        price: variant.price,
-        sku: variant.sku,
-    };
+    if (!productSet.product) throw new Error("Shopify returned no product and no errors.");
+    return productSet.product;
 }
 
 export interface ShopifyProduct {
@@ -641,9 +623,11 @@ const PRODUCT_MEDIA = `
 `;
 
 // Shopify processes images after productSet returns. Check every 2 seconds
-// until each image is READY or FAILED, or the time limit is reached.
+// until all expected images are there and each is READY or FAILED, or the time
+// limit is reached. Images can appear on the product a moment after productSet.
 export async function waitForImages(
     productId: string,
+    expectedCount: number,
     timeoutMs = 60_000,
 ): Promise<MediaResult[]> {
     const deadline = Date.now() + timeoutMs;
@@ -657,9 +641,9 @@ export async function waitForImages(
             errors: node.mediaErrors.map((e) => e.message),
         }));
 
-        const done = media.every(
-            (m) => m.status === "READY" || m.status === "FAILED",
-        );
+        const done =
+            media.length >= expectedCount &&
+            media.every((m) => m.status === "READY" || m.status === "FAILED");
         if (done || Date.now() > deadline) return media;
 
         await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -703,11 +687,12 @@ const COLLECTION_UPDATE = `
 `;
 
 const COLLECTION_QUERY = `
-    query GetCollection($id: ID!) {
+    query GetCollection($id: ID!, $publicationId: ID!) {
         collection(id: $id) {
             id
             title
             descriptionHtml
+            onlineStore: publishedOnPublication(publicationId: $publicationId)
         }
     }
 `;
@@ -770,13 +755,20 @@ export async function updateCollection(
     throwUserErrors("Shopify rejected the collection update", collectionUpdate.userErrors);
 }
 
+export interface ShopifyCollection {
+    id: string;
+    title: string;
+    descriptionHtml: string;
+    /** Whether the collection is published to the Online Store sales channel. */
+    onlineStore: boolean;
+}
+
 // Returns null if the collection doesn't exist (e.g. it was deleted in Shopify).
-export async function getCollection(
-    id: string,
-): Promise<{ id: string; title: string; descriptionHtml: string } | null> {
-    const { collection } = await graphql<{
-        collection: { id: string; title: string; descriptionHtml: string } | null;
-    }>(COLLECTION_QUERY, { id });
+export async function getCollection(id: string): Promise<ShopifyCollection | null> {
+    const { collection } = await graphql<{ collection: ShopifyCollection | null }>(
+        COLLECTION_QUERY,
+        { id, publicationId: await getOnlineStorePublicationId() },
+    );
     return collection;
 }
 

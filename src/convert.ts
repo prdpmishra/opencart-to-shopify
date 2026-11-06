@@ -177,12 +177,16 @@ export function toProductSetInput(
         title: product.name,
         descriptionHtml: cleanDescription(product.description),
         handle: buildHandle(product),
-        // OpenCart hides disabled products and products whose "Date Available" is in the future.
-        status: product.enabled && !product.availableLater ? "ACTIVE" : "DRAFT",
+        // OpenCart hides disabled products, products whose "Date Available" is in the
+        // future, and products not assigned to the store.
+        status: product.enabled && !product.availableLater && product.inDefaultStore ? "ACTIVE" : "DRAFT",
         // Empty clears Shopify's SEO fields, so it falls back to the title and description.
         seo: { title: tidyText(product.metaTitle), description: tidyText(product.metaDescription) },
         ...(product.manufacturer ? { vendor: product.manufacturer } : {}),
-        tags: [...new Set(product.tags)],
+        // Shopify treats tags case-insensitively ("Apple" = "apple"), so keep the first of each.
+        tags: product.tags.filter(
+            (tag, i) => product.tags.findIndex((t) => t.toLowerCase() === tag.toLowerCase()) === i,
+        ),
         productOptions:
             options.length > 0
                 ? options.map((o) => ({ name: o.name, values: o.values.map((v) => ({ name: v.name })) }))
@@ -227,7 +231,7 @@ export function cleanDescription(html: string): string {
 export function toHandle(text: string): string {
     return text
         .normalize("NFKD") // split accented letters: "é" → "e" + accent mark
-        .replace(/[̀-ͯ]/g, "") // drop the accent marks
+        .replace(/[\u0300-\u036f]/g, "") // drop the accent marks
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-") // anything else becomes one hyphen
         .replace(/^-+|-+$/g, ""); // no hyphens at the start or end

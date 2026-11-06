@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 export type EntityType = "product" | "category";
@@ -12,10 +13,12 @@ export interface Mapping {
 let db: DatabaseSync | undefined;
 
 // Opened on first use, so just importing this module doesn't create the file.
+// Always in the project folder (next to src/), whichever folder the script is
+// started from: a second, empty mapping file would lead to duplicate products.
 function getDb(): DatabaseSync {
     if (db) return db;
 
-    db = new DatabaseSync("migration.sqlite");
+    db = new DatabaseSync(join(import.meta.dirname, "..", "migration.sqlite"));
     db.exec(`
         CREATE TABLE IF NOT EXISTS mapping (
             opencart_id INTEGER NOT NULL,

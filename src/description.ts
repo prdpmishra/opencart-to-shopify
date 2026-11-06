@@ -12,6 +12,8 @@ const IMG_SRC = /(<img\b[^>]*?\ssrc\s*=\s*)(["'])(.*?)\2/gi;
 // Returns null for images that aren't OpenCart's (e.g. on another website).
 export function toImagePath(src: string, imageUrl: string): string | null {
     const prefix = imageUrl.endsWith("/") ? imageUrl : `${imageUrl}/`;
+    if (!URL.canParse(prefix))
+        throw new Error(`OPENCART_IMAGE_URL must be a full URL, e.g. http://localhost/opencart/image/ (got "${imageUrl}")`);
     const rootPrefix = new URL(prefix).pathname; // e.g. "/opencart/image/"
 
     let path: string;

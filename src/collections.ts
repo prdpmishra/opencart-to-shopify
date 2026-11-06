@@ -34,7 +34,7 @@ export async function prepareCollections(
         const mapping = findMapping("category", category.id);
 
         if (mapping) {
-            await syncCollection(category.id, mapping.shopify_id, title, descriptionHtml, dryRun);
+            await syncCollection(category, mapping.shopify_id, descriptionHtml, dryRun);
             result.push({ id: mapping.shopify_id, title });
             continue;
         }
@@ -53,33 +53,34 @@ export async function prepareCollections(
         }
 
         const created = await createCollection(input);
+        // Saved straight away: if anything below fails, a rerun must not create it again.
+        saveMapping("category", category.id, created.id);
+        console.log(`Created collection "${title}" for category ${category.id}: ${created.id}`);
         if (created.handle !== handle)
             console.log(`Category ${category.id}: handle "${handle}" was taken, Shopify used "${created.handle}"`);
 
         // A disabled OpenCart category stays hidden: the collection isn't published.
         if (category.enabled) await publishToOnlineStore(created.id);
         else console.log(`Category ${category.id} is disabled in OpenCart, so its collection is not published.`);
-
-        saveMapping("category", category.id, created.id);
-        console.log(`Created collection "${title}" for category ${category.id}: ${created.id}`);
         result.push({ id: created.id, title });
     }
 
     return result;
 }
 
-// Updates the title and description from OpenCart. Handle and image are kept.
+// Updates the title and description from OpenCart, and publishes the collection
+// of an enabled category if it isn't published yet. Handle and image are kept.
 async function syncCollection(
-    categoryId: number,
+    category: Category,
     collectionId: string,
-    title: string,
     descriptionHtml: string,
     dryRun: boolean,
 ): Promise<void> {
+    const title = category.name;
     const current = await getCollection(collectionId);
     if (!current)
         throw new Error(
-            `Category ${categoryId} is mapped to ${collectionId}, but that collection no longer exists in Shopify. ` +
+            `Category ${category.id} is mapped to ${collectionId}, but that collection no longer exists in Shopify. ` +
                 "Delete its mapping row to create it again.",
         );
 
@@ -89,6 +90,8 @@ async function syncCollection(
         changes.push(
             `description changed (${current.descriptionHtml.length} → ${descriptionHtml.length} characters)`,
         );
+    const publish = category.enabled && !current.onlineStore;
+    if (publish) changes.push("Online Store: not published → published");
     if (changes.length === 0) return;
 
     if (dryRun) {
@@ -96,6 +99,8 @@ async function syncCollection(
         return;
     }
 
-    await updateCollection(collectionId, { title, descriptionHtml });
+    if (current.title !== title || !sameHtml(current.descriptionHtml, descriptionHtml))
+        await updateCollection(collectionId, { title, descriptionHtml });
+    if (publish) await publishToOnlineStore(collectionId);
     console.log(`Updated collection "${title}": ${changes.join(", ")}`);
 }
