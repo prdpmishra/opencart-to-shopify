@@ -45,6 +45,8 @@ interface FullProductRow extends RowDataPacket {
     meta_description: string | null;
     tag: string | null;
     manufacturer: string | null;
+    manufacturer_id: number;
+    manufacturer_keyword: string | null;
     weight: string;
     weight_unit: string | null;
     length: string;
@@ -84,6 +86,9 @@ export interface FullProduct {
     /** Comma-separated in OpenCart, e.g. "iPhone, Apple, smartphone". */
     tags: string[];
     manufacturer: string | null;
+    manufacturerId: number;
+    /** SEO URL keyword of the manufacturer page, or null. */
+    manufacturerSeoKeyword: string | null;
     weight: number;
     /** The weight class's unit, e.g. "kg", "g", "lb", "oz". */
     weightUnit: string | null;
@@ -124,7 +129,10 @@ export async function getProduct(
             (p.date_available <> '0000-00-00' AND p.date_available > NOW()) AS available_later,
             EXISTS(SELECT 1 FROM \`${dbPrefix}product_to_store\` p2s
                 WHERE p2s.product_id = p.product_id AND p2s.store_id = 0) AS in_default_store,
-            pd.meta_title, pd.meta_description, pd.tag, m.name AS manufacturer
+            pd.meta_title, pd.meta_description, pd.tag, m.name AS manufacturer, p.manufacturer_id,
+            (SELECT keyword FROM \`${dbPrefix}seo_url\` msu
+                WHERE msu.query = CONCAT('manufacturer_id=', p.manufacturer_id)
+                    AND msu.store_id = 0 AND msu.language_id = pd.language_id) AS manufacturer_keyword
         FROM \`${dbPrefix}product\` p
         LEFT JOIN \`${dbPrefix}product_description\` pd
             ON pd.product_id = p.product_id AND pd.language_id = ?
@@ -165,6 +173,8 @@ export async function getProduct(
             .map((t) => t.trim())
             .filter((t) => t !== ""),
         manufacturer: row.manufacturer ? decode(row.manufacturer) : null,
+        manufacturerId: row.manufacturer_id,
+        manufacturerSeoKeyword: row.manufacturer_keyword || null,
         weight: Number(row.weight),
         weightUnit: row.weight_unit?.trim() || null,
         hasDimensions: [row.length, row.width, row.height].some((d) => Number(d) !== 0),
@@ -404,6 +414,16 @@ export interface Category {
     /** SEO URL keyword for store 0 and LANGUAGE_ID, or null if none is set. */
     seoKeyword: string | null;
     enabled: boolean;
+    /** Category IDs from the top level down to this one, e.g. [20, 27] for Desktops › Mac. */
+    pathIds: number[];
+    /** The SEO keywords of pathIds, or null when one of them has none. */
+    pathKeywords: string[] | null;
+}
+
+interface CategoryPathRow extends RowDataPacket {
+    category_id: number;
+    path_id: number;
+    keyword: string | null;
 }
 
 interface CategoryRow extends RowDataPacket {
@@ -435,14 +455,34 @@ export async function getProductCategories(
         [languageId, languageId, id],
     );
 
-    return rows.map((row) => ({
-        id: row.category_id,
-        name: decode(row.name ?? ""),
-        description: decode(row.description ?? ""),
-        image: row.image?.trim() || null,
-        seoKeyword: row.keyword || null,
-        enabled: row.status === 1,
-    }));
+    if (rows.length === 0) return [];
+
+    // OpenCart's category_path lists every category's ancestors with their level.
+    const ids = rows.map((row) => row.category_id);
+    const [paths] = await connection.query<CategoryPathRow[]>(
+        `SELECT cp.category_id, cp.path_id, su.keyword
+        FROM \`${dbPrefix}category_path\` cp
+        LEFT JOIN \`${dbPrefix}seo_url\` su
+            ON su.query = CONCAT('category_id=', cp.path_id) AND su.store_id = 0 AND su.language_id = ?
+        WHERE cp.category_id IN (?)
+        ORDER BY cp.category_id, cp.level`,
+        [languageId, ids],
+    );
+
+    return rows.map((row) => {
+        const path = paths.filter((p) => p.category_id === row.category_id);
+        const keywords = path.map((p) => p.keyword || null);
+        return {
+            id: row.category_id,
+            name: decode(row.name ?? ""),
+            description: decode(row.description ?? ""),
+            image: row.image?.trim() || null,
+            seoKeyword: row.keyword || null,
+            enabled: row.status === 1,
+            pathIds: path.map((p) => p.path_id),
+            pathKeywords: keywords.every((k) => k !== null) ? (keywords as string[]) : null,
+        };
+    });
 }
 
 interface ProductIdRow extends RowDataPacket {
@@ -456,4 +496,13 @@ export async function getProductIds(connection: Connection): Promise<number[]> {
         `SELECT product_id FROM \`${dbPrefix}product\` ORDER BY product_id`,
     );
     return rows.map((row) => row.product_id);
+}
+
+// Whether OpenCart's "Use SEO URLs" setting is on (URLs like /desktops/mac instead of index.php?...).
+export async function getSeoUrlsEnabled(connection: Connection): Promise<boolean> {
+    const { dbPrefix } = getSettings();
+    const [rows] = await connection.execute<RowDataPacket[]>(
+        `SELECT value FROM \`${dbPrefix}setting\` WHERE store_id = 0 AND \`key\` = 'config_seo_url'`,
+    );
+    return rows[0]?.value === "1";
 }

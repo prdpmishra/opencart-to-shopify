@@ -32,6 +32,12 @@ function getDb(): DatabaseSync {
             shopify_id TEXT NOT NULL,
             shopify_url TEXT NOT NULL,
             migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS redirect_mapping (
+            path TEXT PRIMARY KEY,
+            shopify_id TEXT NOT NULL,
+            target TEXT NOT NULL,
+            migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     `);
     return db;
@@ -94,4 +100,24 @@ export function isMappedShopifyId(entityType: EntityType, shopifyId: string): bo
             .prepare("SELECT 1 FROM mapping WHERE entity_type = ? AND shopify_id = ?")
             .get(entityType, shopifyId) !== undefined
     );
+}
+
+// URL redirects created in Shopify, keyed by the old OpenCart path they redirect from.
+export interface RedirectMapping {
+    path: string;
+    shopify_id: string;
+    target: string;
+    migrated_at: string;
+}
+
+export function findRedirectMapping(path: string): RedirectMapping | undefined {
+    return getDb()
+        .prepare("SELECT * FROM redirect_mapping WHERE path = ?")
+        .get(path) as RedirectMapping | undefined;
+}
+
+export function saveRedirectMapping(path: string, shopifyId: string, target: string): void {
+    getDb()
+        .prepare("INSERT INTO redirect_mapping (path, shopify_id, target) VALUES (?, ?, ?)")
+        .run(path, shopifyId, target);
 }

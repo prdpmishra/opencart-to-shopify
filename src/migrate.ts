@@ -11,11 +11,13 @@ import {
     getProductCategories,
     getProductIds,
     getProductOptions,
+    getSeoUrlsEnabled,
     type FullProduct,
 } from "./opencart.ts";
 import { sameHtml, shopifyWeightUnit, toProductSetInput, type ProductSetInput } from "./convert.ts";
 import { prepareCollections, type ProductCollection } from "./collections.ts";
 import { rewriteDescriptionImages } from "./description.ts";
+import { buildRedirects, createRedirects } from "./redirects.ts";
 import { findMapping, isMappedShopifyId, saveMapping } from "./mapping.ts";
 import {
     adminProductUrl,
@@ -44,6 +46,8 @@ interface RunOptions {
     createMissing: boolean;
     locationId: string;
     priceTaxRate: number | null;
+    // OpenCart's "Use SEO URLs" setting: which old URLs need redirects.
+    seoUrls: boolean;
 }
 
 async function main() {
@@ -95,6 +99,7 @@ async function main() {
             createMissing: all || !update,
             locationId: requireEnv("SHOPIFY_LOCATION_ID"),
             priceTaxRate,
+            seoUrls: await getSeoUrlsEnabled(connection),
         };
 
         if (!all) {
@@ -143,7 +148,7 @@ async function main() {
 async function migrateProduct(
     connection: Connection,
     id: number,
-    { update, dryRun, createMissing, locationId, priceTaxRate }: RunOptions,
+    { update, dryRun, createMissing, locationId, priceTaxRate, seoUrls }: RunOptions,
 ): Promise<Result> {
     const existing = findMapping("product", id);
     if (existing && !update) {
@@ -219,11 +224,18 @@ async function migrateProduct(
         dryRun,
     );
 
-    if (existing)
-        return updateProduct(id, existing.shopify_id, input, collections, locationId, dryRun);
+    let outcome: { result: Result; handle: string };
+    if (existing) outcome = await updateProduct(id, existing.shopify_id, input, collections, locationId, dryRun);
+    else {
+        input.collections = collections.flatMap((c) => (c.id ? [c.id] : []));
+        outcome = await createProduct(connection, product, input, dryRun);
+    }
 
-    input.collections = collections.flatMap((c) => (c.id ? [c.id] : []));
-    return createProduct(connection, product, input, dryRun);
+    // Old OpenCart URLs of the product, its categories and manufacturer → the new pages.
+    const created = await createRedirects(buildRedirects(product, outcome.handle, collections, seoUrls), dryRun);
+    if (created > 0) console.log(`Created ${created} URL redirect(s) from old OpenCart URLs.`);
+
+    return outcome.result;
 }
 
 async function createProduct(
@@ -231,7 +243,7 @@ async function createProduct(
     product: FullProduct,
     input: ProductSetInput,
     dryRun: boolean,
-): Promise<Result> {
+): Promise<{ result: Result; handle: string }> {
     const id = product.id;
 
     // Find the image files on disk. Missing ones are skipped with a warning.
@@ -250,7 +262,7 @@ async function createProduct(
     if (dryRun) {
         console.log(JSON.stringify(input, null, 2));
         console.log("Dry run: Shopify was not called, nothing was uploaded and no mapping was saved.");
-        return "dry run";
+        return { result: "dry run", handle: input.handle ?? "" };
     }
 
     // Upload each image. A failed upload is skipped with a warning.
@@ -313,7 +325,7 @@ async function createProduct(
             console.warn(`Warning: only ${ready} of ${uploaded.length} image(s) are ready. Check the product in Shopify admin.`);
     }
 
-    return "created";
+    return { result: "created", handle: created.handle };
 }
 
 // A weight of 0 is the same in any unit; otherwise unit and value must match.
@@ -343,7 +355,7 @@ async function updateProduct(
     collections: ProductCollection[],
     locationId: string,
     dryRun: boolean,
-): Promise<Result> {
+): Promise<{ result: Result; handle: string }> {
     const current = await getShopifyProduct(shopifyId, locationId);
     if (!current)
         throw new Error(
@@ -462,14 +474,14 @@ async function updateProduct(
 
     if (changes.length === 0) {
         console.log(`Product ${id} is already up to date in Shopify (${shopifyId}). Nothing to do.`);
-        return "up to date";
+        return { result: "up to date", handle: current.handle };
     }
 
     console.log(`Product ${id} changes:\n  ${changes.join("\n  ")}`);
 
     if (dryRun) {
         console.log("Dry run: Shopify was not called.");
-        return "dry run";
+        return { result: "dry run", handle: current.handle };
     }
 
     if (productChanged) {
@@ -487,7 +499,7 @@ async function updateProduct(
     if (publish) await publishToOnlineStore(shopifyId);
 
     console.log(`Updated product ${id} in Shopify: ${shopifyId}\n  ${adminProductUrl(shopifyId)}`);
-    return "updated";
+    return { result: "updated", handle: current.handle };
 }
 
 main();

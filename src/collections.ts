@@ -14,6 +14,9 @@ export interface ProductCollection {
     /** null in a dry run for a collection that doesn't exist yet. */
     id: string | null;
     title: string;
+    /** The collection's handle; in a dry run for a new collection, the one it would get. */
+    handle: string;
+    category: Category;
 }
 
 // Makes sure each category has a Shopify collection: creates missing ones and
@@ -34,18 +37,18 @@ export async function prepareCollections(
         const mapping = findMapping("category", category.id);
 
         if (mapping) {
-            await syncCollection(category, mapping.shopify_id, descriptionHtml, dryRun);
-            result.push({ id: mapping.shopify_id, title });
-            continue;
-        }
-
-        if (dryRun) {
-            console.log(`Collection would be created for category ${category.id}: "${title}"`);
-            result.push({ id: null, title });
+            const handle = await syncCollection(category, mapping.shopify_id, descriptionHtml, dryRun);
+            result.push({ id: mapping.shopify_id, title, handle, category });
             continue;
         }
 
         const handle = buildHandle(category, "category");
+        if (dryRun) {
+            console.log(`Collection would be created for category ${category.id}: "${title}"`);
+            result.push({ id: null, title, handle, category });
+            continue;
+        }
+
         const input: CollectionInput = { title, handle, descriptionHtml };
         if (category.image) {
             const url = await toShopifyFileUrl(category.image, "Category image", false);
@@ -62,7 +65,7 @@ export async function prepareCollections(
         // A disabled OpenCart category stays hidden: the collection isn't published.
         if (category.enabled) await publishToOnlineStore(created.id);
         else console.log(`Category ${category.id} is disabled in OpenCart, so its collection is not published.`);
-        result.push({ id: created.id, title });
+        result.push({ id: created.id, title, handle: created.handle, category });
     }
 
     return result;
@@ -70,12 +73,13 @@ export async function prepareCollections(
 
 // Updates the title and description from OpenCart, and publishes the collection
 // of an enabled category if it isn't published yet. Handle and image are kept.
+// Returns the collection's handle.
 async function syncCollection(
     category: Category,
     collectionId: string,
     descriptionHtml: string,
     dryRun: boolean,
-): Promise<void> {
+): Promise<string> {
     const title = category.name;
     const current = await getCollection(collectionId);
     if (!current)
@@ -92,15 +96,16 @@ async function syncCollection(
         );
     const publish = category.enabled && !current.onlineStore;
     if (publish) changes.push("Online Store: not published → published");
-    if (changes.length === 0) return;
+    if (changes.length === 0) return current.handle;
 
     if (dryRun) {
         console.log(`Collection "${current.title}" would be updated: ${changes.join(", ")}`);
-        return;
+        return current.handle;
     }
 
     if (current.title !== title || !sameHtml(current.descriptionHtml, descriptionHtml))
         await updateCollection(collectionId, { title, descriptionHtml });
     if (publish) await publishToOnlineStore(collectionId);
     console.log(`Updated collection "${title}": ${changes.join(", ")}`);
+    return current.handle;
 }

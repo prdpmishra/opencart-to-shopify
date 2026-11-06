@@ -691,6 +691,7 @@ const COLLECTION_QUERY = `
         collection(id: $id) {
             id
             title
+            handle
             descriptionHtml
             onlineStore: publishedOnPublication(publicationId: $publicationId)
         }
@@ -758,6 +759,7 @@ export async function updateCollection(
 export interface ShopifyCollection {
     id: string;
     title: string;
+    handle: string;
     descriptionHtml: string;
     /** Whether the collection is published to the Online Store sales channel. */
     onlineStore: boolean;
@@ -798,4 +800,31 @@ export async function publishToOnlineStore(id: string): Promise<void> {
         { id, input: [{ publicationId }] },
     );
     throwUserErrors("Could not publish to the Online Store", publishablePublish.userErrors);
+}
+
+const URL_REDIRECT_CREATE = `
+    mutation UrlRedirectCreate($urlRedirect: UrlRedirectInput!) {
+        urlRedirectCreate(urlRedirect: $urlRedirect) {
+            urlRedirect {
+                id
+            }
+            userErrors {
+                field
+                message
+            }
+        }
+    }
+`;
+
+// Creates a URL redirect from an old path to a new one. Returns null if the path
+// already has a redirect (Shopify allows one per path).
+export async function createUrlRedirect(path: string, target: string): Promise<string | null> {
+    const { urlRedirectCreate } = await graphql<{
+        urlRedirectCreate: { urlRedirect: { id: string } | null } & UserErrorsResult;
+    }>(URL_REDIRECT_CREATE, { urlRedirect: { path, target } });
+
+    if (urlRedirectCreate.userErrors.some((e) => e.message.includes("already been taken"))) return null;
+    throwUserErrors("Shopify rejected the redirect", urlRedirectCreate.userErrors);
+    if (!urlRedirectCreate.urlRedirect) throw new Error("Shopify returned no redirect.");
+    return urlRedirectCreate.urlRedirect.id;
 }

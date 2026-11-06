@@ -2,7 +2,7 @@
 
 Migrates products from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, status, SEO, vendor, tags and weight. Enabled products become active and are published to the Online Store; disabled ones become drafts.
+For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ For now it migrates one product at a time with its basic details, images, varian
   read_products,write_products,read_files,write_files,read_inventory,write_inventory,read_locations,read_publications,write_publications,read_online_store_navigation,write_online_store_navigation
   ```
 
-  Products, files, inventory, locations and publications are used now; the navigation scopes are for upcoming features (menus, URL redirects). The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
+  All of them are used: products, files, inventory, locations, publications (sales channels) and online store navigation (URL redirects; menus later). The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
 
 ## Setup
 
@@ -34,6 +34,7 @@ DB_PREFIX=oc_
 LANGUAGE_ID=1
 OPENCART_IMAGE_DIR=C:\xampp\htdocs\opencart\image
 OPENCART_IMAGE_URL=http://localhost/opencart/image/
+OPENCART_STORE_URL=http://localhost/opencart/
 
 # Shopify app
 SHOPIFY_SHOP=my-store
@@ -51,6 +52,7 @@ PRICE_TAX_RATE=
 | `DB_PREFIX` | No | Table prefix, e.g. `oc_`. Defaults to none. |
 | `LANGUAGE_ID` | No | OpenCart language for product names, descriptions and SEO keywords. Defaults to `1`. |
 | `OPENCART_IMAGE_DIR` | Yes, for `migrate` | OpenCart's `image` folder on this computer |
+| `OPENCART_STORE_URL` | Yes, for `migrate` | OpenCart's store URL (`HTTP_SERVER` in its `config.php`). Only its path is used for redirects: set it to the live shop's URL before the real migration. |
 | `OPENCART_IMAGE_URL` | Yes, for `migrate` | The URL of that folder as used in descriptions, e.g. `http://localhost/opencart/image/` |
 | `SHOPIFY_SHOP` | Yes | `my-store` or `my-store.myshopify.com` |
 | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | Yes | From the Shopify app's settings |
@@ -118,7 +120,20 @@ OpenCart is the source of truth: the title, description, status, SEO, vendor, ta
 
 The handle and gallery images are not changed, so product URLs stay the same. Status does follow OpenCart: a product disabled in OpenCart becomes a draft in Shopify. Changes to the gallery images in OpenCart are not synced; images inside the description are.
 
-`migration.sqlite` records which products, categories and description images have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
+### URL redirects
+
+After a product is created or updated, its old OpenCart URLs get Shopify URL redirects to the new pages, so existing links and search results keep working once the domain points to Shopify:
+
+| Old OpenCart URL | New Shopify URL |
+| --- | --- |
+| `index.php?route=product/product&product_id=48` | `/products/<handle>` |
+| `index.php?route=product/product&path=20_27&product_id=41` (from a category page) | `/products/<handle>` |
+| `index.php?route=product/category&path=20_27` | `/collections/<handle>` |
+| `index.php?route=product/manufacturer/info&manufacturer_id=8` | `/collections/vendors?q=Apple` (Shopify's built-in vendor page) |
+
+When OpenCart's "Use SEO URLs" setting is on, the SEO forms are added too (`/imac`, `/desktops/mac`, `/desktops/mac/imac`, `/apple`), built the way OpenCart builds them. All paths start with the path of `OPENCART_STORE_URL`. Shopify matches query parameters in any order. Each redirect is created once and remembered in `migration.sqlite`; a path that already has a redirect made outside the migration is left alone with a warning. Redirects only take effect while the old path doesn't exist in Shopify, and can't be tried while the storefront is password-protected.
+
+`migration.sqlite` records which products, categories, description images and redirects have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
 
 ## Project structure
 
@@ -132,5 +147,6 @@ src/
   shopify.ts   Access token, graphql() helper and product creation
   collections.ts  OpenCart categories → Shopify collections
   description.ts  Images inside descriptions → Shopify Files
-  mapping.ts   SQLite mapping of migrated products and files
+  mapping.ts   SQLite mapping of migrated products, categories, files and redirects
+  redirects.ts Old OpenCart URLs → Shopify URL redirects
 ```
