@@ -11,7 +11,7 @@ For now it migrates one product at a time with its basic details, images, varian
 - A Shopify app with these scopes:
 
   ```
-  read_products,write_products,read_files,write_files,read_inventory,write_inventory,read_locations,read_publications,write_publications,read_online_store_navigation,write_online_store_navigation
+  read_products,write_products,read_files,write_files,read_inventory,write_inventory,read_locations,read_publications,write_publications,read_online_store_navigation,write_online_store_navigation,read_discounts,write_discounts
   ```
 
   All of them are used: products, files, inventory, locations, publications (sales channels) and online store navigation (URL redirects; menus later). The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
@@ -90,7 +90,8 @@ Shopify limits how much API work an app can do per second. When a request is ref
    - **Handle:** the product's SEO keyword (store 0), normalised to lowercase letters, numbers and hyphens. Falls back to the product name, then `product-<id>`. Any change or fallback is logged.
    - **SKU:** the OpenCart SKU, or the model if the SKU is empty. Variants get the SKU plus their option values, e.g. `Product 8-small`.
    - **Price:** unchanged, rounded to 2 decimals. A variant's price is the product price plus (or minus) its option values' price modifiers.
-   - **Special price:** the special that OpenCart applies right now for the default customer group (start date empty or past, end date empty or future; lowest priority, then lowest price) becomes the sale price, and the normal price becomes the compare-at price, which themes show crossed out. Without a special, the compare-at price is cleared. Shopify can't schedule price changes, so a special with an end date gives a warning to run `--update` after it ends, and a future special is applied by an `--update` after it starts. Specials for other customer groups and quantity discounts (`product_discount`) are not migrated; each one gives a warning.
+   - **Special price:** the special that OpenCart applies right now for the default customer group (start date empty or past, end date empty or future; lowest priority, then lowest price) becomes the sale price, and the normal price becomes the compare-at price, which themes show crossed out. Without a special, the compare-at price is cleared. Shopify can't schedule price changes, so a special with an end date gives a warning to run `--update` after it ends, and a future special is applied by an `--update` after it starts. Specials for other customer groups are not migrated; each one gives a warning.
+   - **Quantity discounts:** see [Quantity discounts](#quantity-discounts) below.
    - **Tax:** a product is taxable ("Charge tax on this product") when its OpenCart tax class has at least one tax rule. OpenCart stores prices excluding tax, so they're sent unchanged when Shopify's "All prices include tax" setting is off. When it's on, `PRICE_TAX_RATE` is added (e.g. 100.00 at 20% → 120.00), so customers pay the same total; without `PRICE_TAX_RATE` the run stops. Tax rates themselves aren't product data in Shopify: set them up in Shopify's tax settings. Fixed tax amounts (e.g. an eco tax) have no Shopify equivalent and give a warning.
    - **Status:** enabled products whose "Date Available" has passed become `ACTIVE` and are published to the Online Store (Shopify doesn't publish active products by itself). Disabled products, products not assigned to OpenCart's default store, and products available from a future date become `DRAFT`; run `--update` after that date.
    - **SEO, vendor, tags:** the meta title and meta description become Shopify's SEO title and description (tabs and extra spaces removed; empty ones fall back to the product title and description). The manufacturer becomes the vendor, and OpenCart's comma-separated tags become Shopify tags (duplicates that differ only in upper/lower case are merged, as Shopify does). Meta keywords have no Shopify equivalent and are skipped.
@@ -122,6 +123,22 @@ OpenCart is the source of truth: the title, description, status, SEO, vendor, ta
 
 The handle and gallery images are not changed, so product URLs stay the same. Status does follow OpenCart: a product disabled in OpenCart becomes a draft in Shopify. Changes to the gallery images in OpenCart are not synced; images inside the description are.
 
+### Quantity discounts
+
+OpenCart's quantity discounts ("buy 10 or more for 88.00 each") become Shopify **automatic discounts**, one per tier, synced after each product is created or updated. They're kept the same way as in OpenCart's cart:
+
+- **Amount:** a fixed amount off each item, the normal price minus the tier price (plus `PRICE_TAX_RATE` when Shopify's prices include tax). In OpenCart, option price modifiers are added on top of the tier price, so every variant gets the same amount off. A tier that isn't lower than the normal price gives a warning.
+- **Minimum quantity:** all variants of the product in the cart count towards it, as in OpenCart.
+- **Tiers:** the discounts don't combine with each other, so Shopify applies only the biggest tier reached. They do combine with order and shipping discounts (e.g. discount codes), as coupons do in OpenCart.
+- **Dates:** OpenCart's start and end dates become the discount's start and end, so Shopify schedules them itself. Tiers that have already ended aren't migrated.
+- **Title** (shown at checkout): e.g. `Buy 10+, save $12.00 each`, in the shop's currency.
+
+Only tiers for OpenCart's default customer group are migrated; others give a warning, as does a second tier with the same quantity (OpenCart's choice, lowest priority and then price, is used).
+
+**An active special price turns the tiers off.** OpenCart's cart then charges the special price whatever the quantity, while in Shopify a tier would come off the special price. So while a special is active, the tiers aren't migrated (existing ones are deleted) with a warning to run `--update` after the special ends.
+
+On `--update`, OpenCart is the source of truth: changed tiers are updated, tiers removed in OpenCart are deleted from Shopify, and a discount deleted in Shopify is created again. Each discount is remembered in `migration.sqlite` by product and quantity, because OpenCart gives tier rows new IDs each time a product is saved. Shopify allows only a limited number of active automatic discounts per store (25, according to its help centre).
+
 ### URL redirects
 
 After a product is created or updated, its old OpenCart URLs get Shopify URL redirects to the new pages, so existing links and search results keep working once the domain points to Shopify:
@@ -143,7 +160,7 @@ Categories in the menu that have no collection yet (because no migrated product 
 
 The menu is compared with Shopify's first: if it's the same, nothing is changed, so the command can be rerun. Otherwise the whole menu is replaced, including items added in Shopify, and the old top-level items are logged. Shopify's footer and other menus aren't touched.
 
-`migration.sqlite` records which products, categories, description images and redirects have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
+`migration.sqlite` records which products, categories, description images, redirects and discounts have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
 
 ## Project structure
 
@@ -157,7 +174,8 @@ src/
   convert.ts   OpenCart product → Shopify productSet input, handle building
   shopify.ts   Access token, graphql() helper and product creation
   collections.ts  OpenCart categories → Shopify collections
+  discounts.ts OpenCart quantity discounts → Shopify automatic discounts
   description.ts  Images inside descriptions → Shopify Files
-  mapping.ts   SQLite mapping of migrated products, categories, files and redirects
+  mapping.ts   SQLite mapping of migrated products, categories, files, redirects and discounts
   redirects.ts Old OpenCart URLs → Shopify URL redirects
 ```

@@ -346,18 +346,32 @@ interface SpecialRow extends RowDataPacket {
     date_end: string;
 }
 
+/** A quantity discount tier: buying `quantity` or more costs `price` each. */
+export interface QuantityDiscount {
+    quantity: number;
+    price: number;
+    /** When the tier starts, or null when it has no start date. */
+    startsAt: Date | null;
+    /** When the tier ends, or null when it has no end date. */
+    endsAt: Date | null;
+}
+
 interface DiscountRow extends RowDataPacket {
     quantity: number;
     price: string;
+    for_default_group: number;
+    // Seconds since 1970, or null for 0000-00-00 ("no date").
+    starts_at: number | null;
+    ends_at: number | null;
 }
 
-// The special price OpenCart shows right now to the default customer group,
-// plus notes about price rules that are not migrated (other groups, future
-// specials, quantity discounts).
+// The special price OpenCart shows right now to the default customer group, its
+// quantity discount tiers that aren't over yet, plus notes about price rules
+// that are not migrated (other groups, future specials).
 export async function getPriceRules(
     connection: Connection,
     id: number,
-): Promise<{ special: Special | null; notMigrated: string[] }> {
+): Promise<{ special: Special | null; discounts: QuantityDiscount[]; notMigrated: string[] }> {
     const { dbPrefix } = getSettings();
 
     // Dates are compared in SQL: OpenCart stores "no date" as 0000-00-00,
@@ -394,15 +408,37 @@ export async function getPriceRules(
             };
     }
 
-    const [discounts] = await connection.execute<DiscountRow[]>(
-        `SELECT quantity, price FROM \`${dbPrefix}product_discount\`
-        WHERE product_id = ? ORDER BY quantity`,
+    // OpenCart compares the dates with MySQL's NOW(), so MySQL turns them into
+    // moments too (UNIX_TIMESTAMP uses the same time zone as NOW()).
+    const [rows] = await connection.execute<DiscountRow[]>(
+        `SELECT pd.quantity, pd.price,
+            pd.customer_group_id = (SELECT value FROM \`${dbPrefix}setting\`
+                WHERE store_id = 0 AND \`key\` = 'config_customer_group_id') AS for_default_group,
+            IF(pd.date_start = '0000-00-00', NULL, UNIX_TIMESTAMP(pd.date_start)) AS starts_at,
+            IF(pd.date_end = '0000-00-00', NULL, UNIX_TIMESTAMP(pd.date_end)) AS ends_at
+        FROM \`${dbPrefix}product_discount\` pd
+        WHERE pd.product_id = ? AND (pd.date_end = '0000-00-00' OR pd.date_end > NOW())
+        ORDER BY pd.quantity, pd.priority, pd.price`,
         [id],
     );
-    for (const row of discounts)
-        notMigrated.push(`quantity discount: ${row.quantity}+ for ${Number(row.price).toFixed(2)} each`);
 
-    return { special, notMigrated };
+    const discounts: QuantityDiscount[] = [];
+    for (const row of rows) {
+        const tier = `quantity discount: ${row.quantity}+ for ${Number(row.price).toFixed(2)} each`;
+        if (!row.for_default_group) notMigrated.push(`${tier} for another customer group`);
+        // OpenCart picks one tier per quantity (lowest priority, then lowest price); Shopify needs one.
+        else if (discounts.some((d) => d.quantity === row.quantity))
+            notMigrated.push(`${tier} (another tier for the same quantity is used)`);
+        else
+            discounts.push({
+                quantity: row.quantity,
+                price: Number(row.price),
+                startsAt: row.starts_at === null ? null : new Date(Number(row.starts_at) * 1000),
+                endsAt: row.ends_at === null ? null : new Date(Number(row.ends_at) * 1000),
+            });
+    }
+
+    return { special, discounts, notMigrated };
 }
 
 export interface Category {

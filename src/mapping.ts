@@ -38,6 +38,13 @@ function getDb(): DatabaseSync {
             shopify_id TEXT NOT NULL,
             target TEXT NOT NULL,
             migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS discount_mapping (
+            product_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            shopify_id TEXT NOT NULL,
+            migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (product_id, quantity)
         )
     `);
     return db;
@@ -120,4 +127,32 @@ export function saveRedirectMapping(path: string, shopifyId: string, target: str
     getDb()
         .prepare("INSERT INTO redirect_mapping (path, shopify_id, target) VALUES (?, ?, ?)")
         .run(path, shopifyId, target);
+}
+
+// Shopify automatic discounts created from OpenCart quantity discount tiers.
+// Keyed by product and quantity: OpenCart gives the tier rows new IDs every
+// time the product is saved in its admin.
+export interface DiscountMapping {
+    product_id: number;
+    quantity: number;
+    shopify_id: string;
+    migrated_at: string;
+}
+
+export function findDiscountMappings(productId: number): DiscountMapping[] {
+    return getDb()
+        .prepare("SELECT * FROM discount_mapping WHERE product_id = ? ORDER BY quantity")
+        .all(productId) as unknown as DiscountMapping[];
+}
+
+export function saveDiscountMapping(productId: number, quantity: number, shopifyId: string): void {
+    getDb()
+        .prepare("INSERT INTO discount_mapping (product_id, quantity, shopify_id) VALUES (?, ?, ?)")
+        .run(productId, quantity, shopifyId);
+}
+
+export function deleteDiscountMapping(productId: number, quantity: number): void {
+    getDb()
+        .prepare("DELETE FROM discount_mapping WHERE product_id = ? AND quantity = ?")
+        .run(productId, quantity);
 }

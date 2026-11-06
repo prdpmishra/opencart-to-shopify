@@ -17,6 +17,7 @@ import {
 import { sameHtml, shopifyWeightUnit, toProductSetInput, type ProductSetInput } from "./convert.ts";
 import { prepareCollections, type ProductCollection } from "./collections.ts";
 import { rewriteDescriptionImages } from "./description.ts";
+import { syncDiscounts } from "./discounts.ts";
 import { buildRedirects, createRedirects } from "./redirects.ts";
 import { findMapping, isMappedShopifyId, saveMapping } from "./mapping.ts";
 import {
@@ -174,9 +175,17 @@ async function migrateProduct(
                 (option.required ? " It is required in OpenCart, but Shopify customers won't be asked for it." : ""),
         );
 
-    const { special, notMigrated } = await getPriceRules(connection, id);
+    const { special, discounts, notMigrated } = await getPriceRules(connection, id);
     for (const rule of notMigrated)
         console.warn(`Warning: product ${id}: ${rule} is not migrated.`);
+    // In OpenCart's cart an active special replaces the quantity discount price,
+    // so the tiers have no effect. In Shopify they'd come off the special price.
+    if (special && discounts.length > 0)
+        console.warn(
+            `Warning: product ${id}: its quantity discounts are not migrated while the special price is active, ` +
+                "because OpenCart ignores them then. Run --update after the special ends.",
+        );
+    const tiers = special ? [] : discounts;
     if (special?.endDate)
         console.warn(
             `Warning: product ${id}: the special price ends on ${special.endDate} in OpenCart, ` +
@@ -235,7 +244,11 @@ async function migrateProduct(
     const created = await createRedirects(buildRedirects(product, outcome.handle, collections, seoUrls), dryRun);
     if (created > 0) console.log(`Created ${created} URL redirect(s) from old OpenCart URLs.`);
 
-    return outcome.result;
+    // Quantity discount tiers → automatic discounts on the product.
+    const shopifyId = findMapping("product", id)?.shopify_id ?? null;
+    const discountChanges = await syncDiscounts(id, shopifyId, tiers, Number(product.price), priceTaxRate, dryRun);
+
+    return outcome.result === "up to date" && discountChanges > 0 ? "updated" : outcome.result;
 }
 
 async function createProduct(
@@ -473,7 +486,7 @@ async function updateProduct(
     }
 
     if (changes.length === 0) {
-        console.log(`Product ${id} is already up to date in Shopify (${shopifyId}). Nothing to do.`);
+        console.log(`Product ${id} is already up to date in Shopify (${shopifyId}).`);
         return { result: "up to date", handle: current.handle };
     }
 

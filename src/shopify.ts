@@ -908,3 +908,170 @@ export async function setMenuItems(menu: ShopifyMenu, items: MenuItem[]): Promis
     });
     throwUserErrors("Shopify rejected the menu", menuUpdate.userErrors);
 }
+
+// The shop's currency, e.g. "GBP" (looked up once).
+let currencyCode: string | undefined;
+export async function getShopCurrency(): Promise<string> {
+    if (!currencyCode) {
+        const { shop } = await graphql<{ shop: { currencyCode: string } }>("{ shop { currencyCode } }");
+        currencyCode = shop.currencyCode;
+    }
+    return currencyCode;
+}
+
+// An automatic "amount off each item" discount on one product, once the cart
+// holds at least minimumQuantity of it (all its variants count).
+export interface AutomaticDiscount {
+    title: string;
+    /** Fixed amount off each item, e.g. "12.00". */
+    amount: string;
+    minimumQuantity: number;
+    /** ISO date-time. */
+    startsAt: string;
+    /** ISO date-time, or null for no end. */
+    endsAt: string | null;
+}
+
+const DISCOUNT_CREATE = `
+    mutation DiscountCreate($discount: DiscountAutomaticBasicInput!) {
+        discountAutomaticBasicCreate(automaticBasicDiscount: $discount) {
+            automaticDiscountNode {
+                id
+            }
+            userErrors {
+                field
+                code
+                message
+            }
+        }
+    }
+`;
+
+const DISCOUNT_UPDATE = `
+    mutation DiscountUpdate($id: ID!, $discount: DiscountAutomaticBasicInput!) {
+        discountAutomaticBasicUpdate(id: $id, automaticBasicDiscount: $discount) {
+            automaticDiscountNode {
+                id
+            }
+            userErrors {
+                field
+                code
+                message
+            }
+        }
+    }
+`;
+
+const DISCOUNT_DELETE = `
+    mutation DiscountDelete($id: ID!) {
+        discountAutomaticDelete(id: $id) {
+            deletedAutomaticDiscountId
+            userErrors {
+                field
+                code
+                message
+            }
+        }
+    }
+`;
+
+const DISCOUNT_QUERY = `
+    query Discount($id: ID!) {
+        discountNode(id: $id) {
+            id
+            discount {
+                ... on DiscountAutomaticBasic {
+                    title
+                    startsAt
+                    endsAt
+                    minimumRequirement {
+                        ... on DiscountMinimumQuantity {
+                            greaterThanOrEqualToQuantity
+                        }
+                    }
+                    customerGets {
+                        value {
+                            ... on DiscountAmount {
+                                amount {
+                                    amount
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+`;
+
+// The DiscountAutomaticBasicInput for a discount on productId.
+function discountInput(productId: string, discount: AutomaticDiscount) {
+    return {
+        title: discount.title,
+        startsAt: discount.startsAt,
+        endsAt: discount.endsAt,
+        minimumRequirement: {
+            quantity: { greaterThanOrEqualToQuantity: String(discount.minimumQuantity) },
+        },
+        customerGets: {
+            value: { discountAmount: { amount: discount.amount, appliesOnEachItem: true } },
+            items: { products: { productsToAdd: [productId] } },
+        },
+        // Only the biggest tier reached applies; order discounts (e.g. codes) and
+        // shipping discounts can still apply on top, as coupons do in OpenCart.
+        combinesWith: { productDiscounts: false, orderDiscounts: true, shippingDiscounts: true },
+    };
+}
+
+export async function createAutomaticDiscount(productId: string, discount: AutomaticDiscount): Promise<string> {
+    const { discountAutomaticBasicCreate: result } = await graphql<{
+        discountAutomaticBasicCreate: { automaticDiscountNode: { id: string } | null } & UserErrorsResult;
+    }>(DISCOUNT_CREATE, { discount: discountInput(productId, discount) });
+    throwUserErrors("Shopify rejected the discount", result.userErrors);
+    if (!result.automaticDiscountNode) throw new Error("Shopify returned no discount.");
+    return result.automaticDiscountNode.id;
+}
+
+export async function updateAutomaticDiscount(
+    id: string,
+    productId: string,
+    discount: AutomaticDiscount,
+): Promise<void> {
+    const { discountAutomaticBasicUpdate: result } = await graphql<{
+        discountAutomaticBasicUpdate: UserErrorsResult;
+    }>(DISCOUNT_UPDATE, { id, discount: discountInput(productId, discount) });
+    throwUserErrors("Shopify rejected the discount update", result.userErrors);
+}
+
+export async function deleteAutomaticDiscount(id: string): Promise<void> {
+    const { discountAutomaticDelete: result } = await graphql<{ discountAutomaticDelete: UserErrorsResult }>(
+        DISCOUNT_DELETE,
+        { id },
+    );
+    throwUserErrors("Could not delete the discount", result.userErrors);
+}
+
+// The discount as AutomaticDiscount, or null if it no longer exists.
+export async function getAutomaticDiscount(id: string): Promise<AutomaticDiscount | null> {
+    const { discountNode } = await graphql<{
+        discountNode: {
+            discount: {
+                title: string;
+                startsAt: string;
+                endsAt: string | null;
+                minimumRequirement: { greaterThanOrEqualToQuantity?: string } | null;
+                customerGets: { value: { amount?: { amount: string } } };
+            };
+        } | null;
+    }>(DISCOUNT_QUERY, { id });
+    if (!discountNode) return null;
+
+    const d = discountNode.discount;
+    return {
+        title: d.title,
+        amount: Number(d.customerGets.value.amount?.amount ?? 0).toFixed(2),
+        minimumQuantity: Number(d.minimumRequirement?.greaterThanOrEqualToQuantity ?? 0),
+        startsAt: d.startsAt,
+        endsAt: d.endsAt,
+    };
+}
