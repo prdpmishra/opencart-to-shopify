@@ -28,9 +28,12 @@ interface FullProductRow extends RowDataPacket {
     price: string;
     sku: string;
     model: string;
+    quantity: number;
+    subtract: number;
     name: string | null;
     description: string | null;
     keyword: string | null;
+    stock_checkout: string | null;
 }
 
 export interface FullProduct {
@@ -42,6 +45,11 @@ export interface FullProduct {
     description: string;
     /** SEO URL keyword for store 0 and LANGUAGE_ID, or null if none is set. */
     seoKeyword: string | null;
+    quantity: number;
+    /** OpenCart's "Subtract Stock": whether sales reduce the quantity. */
+    subtractStock: boolean;
+    /** Store setting: whether customers can buy when the quantity is 0. */
+    allowOutOfStockCheckout: boolean;
 }
 
 function getSettings() {
@@ -62,7 +70,10 @@ export async function getProduct(
 
     // OpenCart 3.0 keeps SEO keywords in seo_url, keyed by query = 'product_id=<id>'.
     const [results] = await connection.execute<FullProductRow[]>(
-        `SELECT p.product_id, p.price, p.sku, p.model, pd.name, pd.description, su.keyword
+        `SELECT p.product_id, p.price, p.sku, p.model, p.quantity, p.subtract,
+            pd.name, pd.description, su.keyword,
+            (SELECT value FROM \`${dbPrefix}setting\`
+                WHERE store_id = 0 AND \`key\` = 'config_stock_checkout') AS stock_checkout
         FROM \`${dbPrefix}product\` p
         LEFT JOIN \`${dbPrefix}product_description\` pd
             ON pd.product_id = p.product_id AND pd.language_id = ?
@@ -83,6 +94,9 @@ export async function getProduct(
         name: decode(row.name ?? ""),
         description: decode(row.description ?? ""),
         seoKeyword: row.keyword || null,
+        quantity: row.quantity,
+        subtractStock: row.subtract === 1,
+        allowOutOfStockCheckout: row.stock_checkout === "1",
     };
 }
 

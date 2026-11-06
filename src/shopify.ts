@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { requireEnv } from "./env.ts";
@@ -160,7 +161,18 @@ export interface ShopifyProduct {
     descriptionHtml: string;
     handle: string;
     status: string;
-    variants: { id: string; price: string; sku: string | null }[];
+    variants: ShopifyVariant[];
+}
+
+export interface ShopifyVariant {
+    id: string;
+    price: string;
+    sku: string | null;
+    inventoryPolicy: string;
+    inventoryItemId: string;
+    tracked: boolean;
+    /** Available quantity at the location, or null if the item isn't stocked there. */
+    available: number | null;
 }
 
 interface ProductQueryResult {
@@ -170,12 +182,24 @@ interface ProductQueryResult {
         descriptionHtml: string;
         handle: string;
         status: string;
-        variants: { nodes: { id: string; price: string; sku: string | null }[] };
+        variants: {
+            nodes: {
+                id: string;
+                price: string;
+                sku: string | null;
+                inventoryPolicy: string;
+                inventoryItem: {
+                    id: string;
+                    tracked: boolean;
+                    inventoryLevel: { quantities: { name: string; quantity: number }[] } | null;
+                };
+            }[];
+        };
     } | null;
 }
 
 const PRODUCT_QUERY = `
-    query GetProduct($id: ID!) {
+    query GetProduct($id: ID!, $locationId: ID!) {
         product(id: $id) {
             id
             title
@@ -187,6 +211,17 @@ const PRODUCT_QUERY = `
                     id
                     price
                     sku
+                    inventoryPolicy
+                    inventoryItem {
+                        id
+                        tracked
+                        inventoryLevel(locationId: $locationId) {
+                            quantities(names: ["available"]) {
+                                name
+                                quantity
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -197,13 +232,102 @@ const PRODUCT_QUERY = `
 // Fetches up to 2 variants: enough to tell whether there is more than one.
 export async function getShopifyProduct(
     productId: string,
+    locationId: string,
 ): Promise<ShopifyProduct | null> {
     const { product } = await graphql<ProductQueryResult>(PRODUCT_QUERY, {
         id: productId,
+        locationId,
     });
     if (!product) return null;
 
-    return { ...product, variants: product.variants.nodes };
+    return {
+        ...product,
+        variants: product.variants.nodes.map((v) => ({
+            id: v.id,
+            price: v.price,
+            sku: v.sku,
+            inventoryPolicy: v.inventoryPolicy,
+            inventoryItemId: v.inventoryItem.id,
+            tracked: v.inventoryItem.tracked,
+            available: v.inventoryItem.inventoryLevel?.quantities[0]?.quantity ?? null,
+        })),
+    };
+}
+
+const INVENTORY_SET_QUANTITIES = `
+    mutation SetQuantity($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+        inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+            inventoryAdjustmentGroup {
+                changes {
+                    name
+                    delta
+                    quantityAfterChange
+                }
+            }
+            userErrors {
+                code
+                field
+                message
+            }
+        }
+    }
+`;
+
+const INVENTORY_ACTIVATE = `
+    mutation ActivateInventory($inventoryItemId: ID!, $locationId: ID!, $available: Int, $idempotencyKey: String!) {
+        inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId, available: $available) @idempotent(key: $idempotencyKey) {
+            inventoryLevel {
+                id
+            }
+            userErrors {
+                field
+                message
+            }
+        }
+    }
+`;
+
+interface UserErrorsResult {
+    userErrors: { field: string[] | null; message: string }[];
+}
+
+// Sets the available quantity of an item at a location.
+// currentQuantity is what we read from Shopify (null = not stocked there yet).
+// If someone changed it in the meantime, Shopify refuses instead of overwriting.
+export async function setAvailableQuantity(
+    inventoryItemId: string,
+    locationId: string,
+    quantity: number,
+    currentQuantity: number | null,
+): Promise<void> {
+    if (currentQuantity === null) {
+        // Not stocked at this location yet: start stocking it there with this quantity.
+        const { inventoryActivate } = await graphql<{ inventoryActivate: UserErrorsResult }>(
+            INVENTORY_ACTIVATE,
+            { inventoryItemId, locationId, available: quantity, idempotencyKey: randomUUID() },
+        );
+        if (inventoryActivate.userErrors.length > 0)
+            throw new Error(inventoryActivate.userErrors.map((e) => e.message).join("; "));
+        return;
+    }
+
+    const { inventorySetQuantities } = await graphql<{ inventorySetQuantities: UserErrorsResult }>(
+        INVENTORY_SET_QUANTITIES,
+        {
+            input: {
+                name: "available",
+                reason: "correction",
+                quantities: [
+                    { inventoryItemId, locationId, quantity, changeFromQuantity: currentQuantity },
+                ],
+            },
+            idempotencyKey: randomUUID(),
+        },
+    );
+    if (inventorySetQuantities.userErrors.length > 0)
+        throw new Error(
+            `Could not set the quantity: ${inventorySetQuantities.userErrors.map((e) => e.message).join("; ")}`,
+        );
 }
 
 // "gid://shopify/Product/123" → the product's page in Shopify admin.

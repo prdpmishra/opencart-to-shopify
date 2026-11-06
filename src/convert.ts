@@ -13,11 +13,18 @@ export interface ProductSetInput {
         optionValues: { optionName: string; name: string }[];
         price: string;
         sku?: string;
+        inventoryItem: { tracked: boolean };
+        inventoryPolicy: "DENY" | "CONTINUE";
+        // Only used when creating; updates set the quantity with inventorySetQuantities.
+        inventoryQuantities?: { locationId: string; name: "available"; quantity: number }[];
     }[];
     files?: { originalSource: string; alt: string; contentType: "IMAGE" }[];
 }
 
-export function toProductSetInput(product: FullProduct): ProductSetInput {
+export function toProductSetInput(
+    product: FullProduct,
+    locationId: string,
+): ProductSetInput {
     const label = `Product ${product.id}`;
 
     const price = Number(product.price);
@@ -28,7 +35,16 @@ export function toProductSetInput(product: FullProduct): ProductSetInput {
     const variant: ProductSetInput["variants"][number] = {
         optionValues: [{ optionName: "Title", name: "Default Title" }],
         price: price.toFixed(2),
+        // OpenCart's "Subtract Stock" is Shopify's "Track quantity".
+        inventoryItem: { tracked: product.subtractStock },
+        inventoryPolicy: product.allowOutOfStockCheckout ? "CONTINUE" : "DENY",
     };
+
+    // Shopify ignores quantities of untracked items, so only send them when tracked.
+    if (product.subtractStock)
+        variant.inventoryQuantities = [
+            { locationId, name: "available", quantity: product.quantity },
+        ];
 
     const sku = product.sku.trim() || product.model.trim();
     if (sku) variant.sku = sku;

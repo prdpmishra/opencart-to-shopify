@@ -11,6 +11,7 @@ import {
     adminProductUrl,
     getShopifyProduct,
     saveProduct,
+    setAvailableQuantity,
     uploadImage,
     waitForImages,
 } from "./shopify.ts";
@@ -65,13 +66,14 @@ async function main() {
 
     try {
         connection = await connect();
+        const locationId = requireEnv("SHOPIFY_LOCATION_ID");
         const product = await getProduct(connection, id);
-        const input = toProductSetInput(product);
+        const input = toProductSetInput(product, locationId);
 
         // Before comparing or sending, so the description has Shopify image URLs.
         input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
 
-        if (existing) await updateProduct(id, existing.shopify_id, input, dryRun);
+        if (existing) await updateProduct(id, existing.shopify_id, input, locationId, dryRun);
         else await createProduct(connection, product, input, dryRun);
     } catch (error) {
         console.error(
@@ -176,15 +178,16 @@ function sameHtml(a: string, b: string): boolean {
     return normalise(a) === normalise(b);
 }
 
-// Updates title, description, price and SKU from OpenCart.
+// Updates title, description, price, SKU and inventory from OpenCart.
 // Handle, status and images are left as they are in Shopify.
 async function updateProduct(
     id: number,
     shopifyId: string,
     input: ProductSetInput,
+    locationId: string,
     dryRun: boolean,
 ) {
-    const current = await getShopifyProduct(shopifyId);
+    const current = await getShopifyProduct(shopifyId, locationId);
     if (!current)
         throw new Error(
             `Product ${id} is mapped to ${shopifyId}, but that product no longer exists in Shopify. ` +
@@ -211,6 +214,17 @@ async function updateProduct(
         changes.push(`price: ${currentVariant.price} → ${newVariant.price}`);
     if ((currentVariant.sku ?? "") !== (newVariant.sku ?? ""))
         changes.push(`sku: "${currentVariant.sku ?? ""}" → "${newVariant.sku ?? ""}"`);
+    if (currentVariant.tracked !== newVariant.inventoryItem.tracked)
+        changes.push(`track quantity: ${currentVariant.tracked} → ${newVariant.inventoryItem.tracked}`);
+    if (currentVariant.inventoryPolicy !== newVariant.inventoryPolicy)
+        changes.push(`out-of-stock policy: ${currentVariant.inventoryPolicy} → ${newVariant.inventoryPolicy}`);
+    const productChanged = changes.length > 0;
+
+    // The quantity is only set for tracked items (see toProductSetInput).
+    const quantity = newVariant.inventoryQuantities?.[0]?.quantity;
+    const quantityChanged = quantity !== undefined && currentVariant.available !== quantity;
+    if (quantityChanged)
+        changes.push(`available at location: ${currentVariant.available ?? "not stocked"} → ${quantity}`);
 
     if (changes.length === 0) {
         console.log(`Product ${id} is already up to date in Shopify (${shopifyId}). Nothing to do.`);
@@ -224,21 +238,29 @@ async function updateProduct(
         return;
     }
 
-    // No handle, status or files, so Shopify keeps them. The variant ID makes
-    // Shopify update the existing variant instead of replacing it.
-    const updateInput: ProductSetInput = {
-        title: input.title,
-        descriptionHtml: input.descriptionHtml,
-        productOptions: input.productOptions,
-        variants: [{ ...newVariant, id: currentVariant.id }],
-    };
-    const updated = await saveProduct(updateInput, shopifyId);
+    if (productChanged) {
+        // No handle, status or files, so Shopify keeps them. The variant ID makes
+        // Shopify update the existing variant instead of replacing it. The quantity
+        // is left out here and set below, with Shopify's compare-and-swap.
+        const { inventoryQuantities, ...variant } = newVariant;
+        const updateInput: ProductSetInput = {
+            title: input.title,
+            descriptionHtml: input.descriptionHtml,
+            productOptions: input.productOptions,
+            variants: [{ ...variant, id: currentVariant.id }],
+        };
+        await saveProduct(updateInput, shopifyId);
+    }
 
-    console.log(
-        `Updated product ${id} in Shopify: ${updated.id}\n` +
-            `  price: ${updated.price}, sku: ${updated.sku ?? "(none)"}\n` +
-            `  ${adminProductUrl(updated.id)}`,
-    );
+    if (quantityChanged)
+        await setAvailableQuantity(
+            currentVariant.inventoryItemId,
+            locationId,
+            quantity,
+            currentVariant.available,
+        );
+
+    console.log(`Updated product ${id} in Shopify: ${shopifyId}\n  ${adminProductUrl(shopifyId)}`);
 }
 
 main();

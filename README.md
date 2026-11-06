@@ -2,7 +2,7 @@
 
 Migrates products from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details and images: title, description, handle, price, SKU, the main image and the additional images. Products are created as drafts. Inventory, variants and categories are not migrated yet.
+For now it migrates one product at a time with its basic details, images and stock: title, description, handle, price, SKU, the main image, the additional images and the quantity. Products are created as drafts. Variants and categories are not migrated yet.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ For now it migrates one product at a time with its basic details and images: tit
   read_products,write_products,read_files,write_files,read_inventory,write_inventory,read_locations,read_publications,write_publications,read_online_store_navigation,write_online_store_navigation
   ```
 
-  Products and files are used now; the others are for upcoming features (inventory, sales channels, URL redirects). The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
+  Products, files, inventory and locations are used now; the others are for upcoming features (sales channels, URL redirects). The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
 
 ## Setup
 
@@ -40,6 +40,7 @@ SHOPIFY_SHOP=my-store
 SHOPIFY_CLIENT_ID=
 SHOPIFY_CLIENT_SECRET=
 SHOPIFY_API_VERSION=2026-10
+SHOPIFY_LOCATION_ID=gid://shopify/Location/123456789
 ```
 
 | Variable | Required | Notes |
@@ -53,6 +54,7 @@ SHOPIFY_API_VERSION=2026-10
 | `SHOPIFY_SHOP` | Yes | `my-store` or `my-store.myshopify.com` |
 | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | Yes | From the Shopify app's settings |
 | `SHOPIFY_API_VERSION` | Yes | Admin API version, e.g. `2026-10` |
+| `SHOPIFY_LOCATION_ID` | Yes, for `migrate` | The Shopify location that gets OpenCart's stock |
 
 ## Usage
 
@@ -73,6 +75,7 @@ npm run typecheck                # type-check without running
    - **Handle:** the product's SEO keyword (store 0), normalised to lowercase letters, numbers and hyphens. Falls back to the product name, then `product-<id>`. Any change or fallback is logged.
    - **SKU:** the OpenCart SKU, or the model if the SKU is empty.
    - **Price:** unchanged, rounded to 2 decimals.
+   - **Stock:** OpenCart's "Subtract Stock" becomes Shopify's "Track quantity". For tracked products, the quantity becomes the available quantity at `SHOPIFY_LOCATION_ID`. OpenCart's "allow checkout when out of stock" store setting becomes "Continue selling when out of stock". OpenCart's stock status text ("2-3 Days", "Pre-Order") and minimum order quantity have no Shopify equivalent and are not migrated.
    - **Description clean-up:** the HTML is tidied to match what Shopify's editor produces: HTML comments and `class` attributes are removed, `<font>` tags are removed (their text is kept, so the theme's font is used), `<b>`/`<i>` become `<strong>`/`<em>`, and line breaks and tabs are collapsed. The visible text doesn't change.
    - **Images inside the description:** each `<img src>` that points to OpenCart (`OPENCART_IMAGE_URL`, the same path without the domain, or a relative `image/…` / `catalog/…` path) is uploaded to Shopify Files and its `src` replaced with the Shopify CDN URL. Each image is uploaded once and remembered in `migration.sqlite`. Missing files and other websites' images keep their original URL. With `--dry-run`, nothing is uploaded.
 4. Finds the product's images in `OPENCART_IMAGE_DIR`: the main image first, then the additional images by sort order. Missing files are skipped with a warning.
@@ -84,12 +87,15 @@ npm run typecheck                # type-check without running
 
 ### Updating a migrated product (`--update`)
 
-OpenCart is the source of truth: the title, description, price and SKU in Shopify are overwritten with OpenCart's values.
+OpenCart is the source of truth: the title, description, price, SKU and stock in Shopify are overwritten with OpenCart's values.
+
+> **Note:** this includes the available quantity. That's right while OpenCart is the live shop, but once Shopify takes orders, `--update` would overwrite stock that Shopify has reduced.
 
 1. Fetches the mapped product from Shopify. Stops if it no longer exists, or if it doesn't have exactly one variant (an update would delete the others).
 2. Prints each difference as `field: old → new`. If nothing differs, it says the product is up to date and doesn't call Shopify. Whitespace between HTML tags is ignored when comparing descriptions, because Shopify reformats HTML when saving it.
 3. With `--dry-run`, stops after printing the differences.
 4. Updates the product with `productSet`, keeping the existing variant (same ID).
+5. Sets the available quantity with `inventorySetQuantities`, passing the quantity it just read as `changeFromQuantity`. If the stock changed in Shopify in the meantime (e.g. a sale), Shopify refuses instead of overwriting it. If the item isn't stocked at the location yet, it is activated there.
 
 The handle, status and gallery images are not changed, so product URLs stay the same and a product you have activated in Shopify stays active. Changes to the gallery images in OpenCart are not synced; images inside the description are.
 
