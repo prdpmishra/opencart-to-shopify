@@ -51,6 +51,8 @@ SHOPIFY_API_VERSION=2026-10
 ```sh
 npm run migrate -- 48 --dry-run  # show what would be sent for OpenCart product 48
 npm run migrate -- 48            # create it in Shopify as a draft
+npm run migrate -- 48 --update --dry-run  # show what would change in Shopify
+npm run migrate -- 48 --update   # update the migrated product from OpenCart
 npm start                        # list OpenCart and Shopify products
 npm run typecheck                # type-check without running
 ```
@@ -69,6 +71,17 @@ npm run typecheck                # type-check without running
 7. Creates the product with its images in one `productSet` call.
 8. Saves the OpenCart → Shopify ID mapping in `migration.sqlite`, then prints the admin link.
 9. Waits up to a minute for Shopify to process the images and prints each one's status (`READY` or `FAILED`).
+
+### Updating a migrated product (`--update`)
+
+OpenCart is the source of truth: the title, description, price and SKU in Shopify are overwritten with OpenCart's values.
+
+1. Fetches the mapped product from Shopify. Stops if it no longer exists, or if it doesn't have exactly one variant (an update would delete the others).
+2. Prints each difference as `field: old → new`. If nothing differs, it says the product is up to date and doesn't call Shopify.
+3. With `--dry-run`, stops after printing the differences.
+4. Updates the product with `productSet`, keeping the existing variant (same ID).
+
+The handle, status and images are not changed, so product URLs stay the same and a product you have activated in Shopify stays active. Image changes in OpenCart are not synced.
 
 `migration.sqlite` records which products have been migrated, so don't delete it. It is gitignored.
 

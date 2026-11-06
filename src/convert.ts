@@ -1,13 +1,15 @@
 import type { FullProduct } from "./opencart.ts";
 
 // The parts of Shopify's ProductSetInput that we fill in.
+// handle and status are left out when updating, so Shopify keeps its values.
 export interface ProductSetInput {
     title: string;
     descriptionHtml: string;
-    handle: string;
-    status: "DRAFT";
+    handle?: string;
+    status?: "DRAFT";
     productOptions: { name: string; values: { name: string }[] }[];
     variants: {
+        id?: string; // set when updating, so the existing variant is kept
         optionValues: { optionName: string; name: string }[];
         price: string;
         sku?: string;

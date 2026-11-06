@@ -93,7 +93,7 @@ interface ProductSetResult {
     };
 }
 
-export interface CreatedProduct {
+export interface SavedProduct {
     id: string;
     handle: string;
     price: string;
@@ -101,8 +101,8 @@ export interface CreatedProduct {
 }
 
 const PRODUCT_SET = `
-    mutation CreateProduct($input: ProductSetInput!) {
-        productSet(synchronous: true, input: $input) {
+    mutation SaveProduct($input: ProductSetInput!, $identifier: ProductSetIdentifiers) {
+        productSet(synchronous: true, input: $input, identifier: $identifier) {
             product {
                 id
                 handle
@@ -122,11 +122,15 @@ const PRODUCT_SET = `
     }
 `;
 
-export async function createProduct(
+// Creates a product, or updates the existing one when productId is given.
+export async function saveProduct(
     input: ProductSetInput,
-): Promise<CreatedProduct> {
+    productId?: string,
+): Promise<SavedProduct> {
     const { productSet } = await graphql<ProductSetResult>(PRODUCT_SET, {
         input,
+        // Left out of the request when undefined, which means "create".
+        identifier: productId ? { id: productId } : undefined,
     });
 
     // Validation problems come back as userErrors, not as a failed request.
@@ -148,6 +152,58 @@ export async function createProduct(
         price: variant.price,
         sku: variant.sku,
     };
+}
+
+export interface ShopifyProduct {
+    id: string;
+    title: string;
+    descriptionHtml: string;
+    handle: string;
+    status: string;
+    variants: { id: string; price: string; sku: string | null }[];
+}
+
+interface ProductQueryResult {
+    product: {
+        id: string;
+        title: string;
+        descriptionHtml: string;
+        handle: string;
+        status: string;
+        variants: { nodes: { id: string; price: string; sku: string | null }[] };
+    } | null;
+}
+
+const PRODUCT_QUERY = `
+    query GetProduct($id: ID!) {
+        product(id: $id) {
+            id
+            title
+            descriptionHtml
+            handle
+            status
+            variants(first: 2) {
+                nodes {
+                    id
+                    price
+                    sku
+                }
+            }
+        }
+    }
+`;
+
+// Returns null if the product doesn't exist (e.g. it was deleted in Shopify).
+// Fetches up to 2 variants: enough to tell whether there is more than one.
+export async function getShopifyProduct(
+    productId: string,
+): Promise<ShopifyProduct | null> {
+    const { product } = await graphql<ProductQueryResult>(PRODUCT_QUERY, {
+        id: productId,
+    });
+    if (!product) return null;
+
+    return { ...product, variants: product.variants.nodes };
 }
 
 // "gid://shopify/Product/123" → the product's page in Shopify admin.
