@@ -828,3 +828,83 @@ export async function createUrlRedirect(path: string, target: string): Promise<s
     if (!urlRedirectCreate.urlRedirect) throw new Error("Shopify returned no redirect.");
     return urlRedirectCreate.urlRedirect.id;
 }
+
+export interface MenuItem {
+    title: string;
+    type: string;
+    /** The linked collection, product, page…; null for plain links. */
+    resourceId: string | null;
+    items: MenuItem[];
+}
+
+export interface ShopifyMenu {
+    id: string;
+    handle: string;
+    title: string;
+    items: MenuItem[];
+}
+
+// Menus can be nested 3 levels deep.
+const MENUS_QUERY = `
+    query Menus {
+        menus(first: 250) {
+            nodes {
+                id
+                handle
+                title
+                items {
+                    title
+                    type
+                    resourceId
+                    items {
+                        title
+                        type
+                        resourceId
+                        items {
+                            title
+                            type
+                            resourceId
+                        }
+                    }
+                }
+            }
+        }
+    }
+`;
+
+const MENU_UPDATE = `
+    mutation MenuUpdate($id: ID!, $title: String!, $handle: String!, $items: [MenuItemUpdateInput!]!) {
+        menuUpdate(id: $id, title: $title, handle: $handle, items: $items) {
+            menu {
+                id
+            }
+            userErrors {
+                field
+                message
+            }
+        }
+    }
+`;
+
+// The menu with this handle (e.g. "main-menu"), or null. The menus query can't
+// filter by handle, so all menus are fetched; a shop has only a few.
+export async function getMenu(handle: string): Promise<ShopifyMenu | null> {
+    const { menus } = await graphql<{ menus: { nodes: ShopifyMenu[] } }>(MENUS_QUERY);
+    const menu = menus.nodes.find((m) => m.handle === handle);
+    if (!menu) return null;
+    // The deepest level isn't queried with its own items; make the shape the same everywhere.
+    const fill = (items: MenuItem[]): MenuItem[] =>
+        items.map((item) => ({ ...item, items: fill(item.items ?? []) }));
+    return { ...menu, items: fill(menu.items) };
+}
+
+// Replaces all items of a menu. Title and handle stay as they are.
+export async function setMenuItems(menu: ShopifyMenu, items: MenuItem[]): Promise<void> {
+    const { menuUpdate } = await graphql<{ menuUpdate: UserErrorsResult }>(MENU_UPDATE, {
+        id: menu.id,
+        title: menu.title,
+        handle: menu.handle,
+        items,
+    });
+    throwUserErrors("Shopify rejected the menu", menuUpdate.userErrors);
+}

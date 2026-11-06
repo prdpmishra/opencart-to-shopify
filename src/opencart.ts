@@ -428,6 +428,7 @@ interface CategoryPathRow extends RowDataPacket {
 
 interface CategoryRow extends RowDataPacket {
     category_id: number;
+    parent_id: number;
     name: string | null;
     description: string | null;
     image: string | null;
@@ -443,7 +444,7 @@ export async function getProductCategories(
     const { dbPrefix, languageId } = getSettings();
 
     const [rows] = await connection.execute<CategoryRow[]>(
-        `SELECT c.category_id, cd.name, cd.description, c.image, su.keyword, c.status
+        `SELECT c.category_id, c.parent_id, cd.name, cd.description, c.image, su.keyword, c.status
         FROM \`${dbPrefix}product_to_category\` ptc
         JOIN \`${dbPrefix}category\` c ON c.category_id = ptc.category_id
         LEFT JOIN \`${dbPrefix}category_description\` cd
@@ -455,7 +456,58 @@ export async function getProductCategories(
         [languageId, languageId, id],
     );
 
+    return toCategories(connection, rows);
+}
+
+export interface MenuCategory {
+    category: Category;
+    /** Its subcategories, in menu order. */
+    children: Category[];
+}
+
+// The categories in OpenCart's header menu, picked the way its common/menu
+// controller does: enabled top-level categories with "Show in top menu" on, each
+// with its enabled subcategories, all in the default store, sorted by sort order
+// and then name.
+export async function getMenuCategories(connection: Connection): Promise<MenuCategory[]> {
+    const { dbPrefix, languageId } = getSettings();
+
+    const [rows] = await connection.execute<CategoryRow[]>(
+        `SELECT c.category_id, c.parent_id, cd.name, cd.description, c.image, su.keyword, c.status
+        FROM \`${dbPrefix}category\` c
+        JOIN \`${dbPrefix}category_to_store\` c2s ON c2s.category_id = c.category_id AND c2s.store_id = 0
+        JOIN \`${dbPrefix}category_description\` cd
+            ON cd.category_id = c.category_id AND cd.language_id = ?
+        LEFT JOIN \`${dbPrefix}seo_url\` su
+            ON su.query = CONCAT('category_id=', c.category_id) AND su.store_id = 0 AND su.language_id = ?
+        WHERE c.status = 1 AND (
+            (c.parent_id = 0 AND c.top = 1)
+            OR c.parent_id IN (SELECT category_id FROM \`${dbPrefix}category\` WHERE parent_id = 0 AND top = 1)
+        )
+        ORDER BY c.sort_order, LCASE(cd.name)`,
+        [languageId, languageId],
+    );
+
+    const categories = (await toCategories(connection, rows)).map((category, i) => ({
+        category,
+        parentId: rows[i]?.parent_id,
+    }));
+    // Subcategories of a top-level category that isn't in the menu (disabled,
+    // not in the default store) aren't shown either: no parent here to go under.
+    return categories
+        .filter(({ parentId }) => parentId === 0)
+        .map(({ category }) => ({
+            category,
+            children: categories
+                .filter(({ parentId }) => parentId === category.id)
+                .map((child) => child.category),
+        }));
+}
+
+// Turns category rows into Categories, adding each one's path from category_path.
+async function toCategories(connection: Connection, rows: CategoryRow[]): Promise<Category[]> {
     if (rows.length === 0) return [];
+    const { dbPrefix, languageId } = getSettings();
 
     // OpenCart's category_path lists every category's ancestors with their level.
     const ids = rows.map((row) => row.category_id);

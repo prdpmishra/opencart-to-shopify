@@ -70,6 +70,8 @@ npm run migrate -- 48 --update   # update the migrated product from OpenCart
 npm run migrate -- --all --dry-run  # check every product without changing anything
 npm run migrate -- --all         # create every product not migrated yet
 npm run migrate -- --all --update  # also update the ones already migrated
+npm run menu -- --dry-run        # show the main menu that would be built from OpenCart's
+npm run menu                     # replace Shopify's main menu with OpenCart's category menu
 npm start                        # list OpenCart and Shopify products
 npm run typecheck                # type-check without running
 ```
@@ -93,7 +95,7 @@ Shopify limits how much API work an app can do per second. When a request is ref
    - **Status:** enabled products whose "Date Available" has passed become `ACTIVE` and are published to the Online Store (Shopify doesn't publish active products by itself). Disabled products, products not assigned to OpenCart's default store, and products available from a future date become `DRAFT`; run `--update` after that date.
    - **SEO, vendor, tags:** the meta title and meta description become Shopify's SEO title and description (tabs and extra spaces removed; empty ones fall back to the product title and description). The manufacturer becomes the vendor, and OpenCart's comma-separated tags become Shopify tags (duplicates that differ only in upper/lower case are merged, as Shopify does). Meta keywords have no Shopify equivalent and are skipped.
    - **Weight and shipping:** a variant's weight is the product weight plus its option values' weights, in the product's unit (kg, g, lb or oz; another unit gives a warning). OpenCart's "Requires Shipping" becomes "This is a physical product". Length, width and height have no Shopify product field (parcel sizes are shipping packages) and give a warning.
-   - **Categories:** each of the product's OpenCart categories becomes a manual Shopify collection, created the first time a product in it is migrated (empty categories are never created). Title, description (cleaned, images moved to Shopify Files) and image come from the category, and the handle from its SEO keyword, like products. Collections of enabled categories are published to the Online Store, also on later runs if one isn't published yet. Shopify collections can't be nested, so the category tree isn't kept. Each collection is remembered in `migration.sqlite`.
+   - **Categories:** each of the product's OpenCart categories becomes a manual Shopify collection, created the first time a product in it is migrated (empty categories only get one through `npm run menu`, below). Title, description (cleaned, images moved to Shopify Files) and image come from the category, and the handle from its SEO keyword, like products. Collections of enabled categories are published to the Online Store, also on later runs if one isn't published yet. Shopify collections can't be nested, so the category tree isn't kept. Each collection is remembered in `migration.sqlite`.
    - **Variants:** select and radio options (up to 3, Shopify's limit) become Shopify options, and every combination of their values becomes a variant. Products without them get Shopify's single `Default Title` variant. Other option types (checkbox, text, textarea, date, time, date & time, file) are customer inputs with no standard Shopify equivalent: they are skipped with a warning, which also says when the option was required.
    - **Stock:** OpenCart's "Subtract Stock" becomes Shopify's "Track quantity". For tracked products, the quantity becomes the available quantity at `SHOPIFY_LOCATION_ID`. OpenCart tracks stock per product and per option value, not per combination, so a variant gets the lowest quantity that OpenCart tracks for it (the product's and each chosen value's). OpenCart's "allow checkout when out of stock" store setting becomes "Continue selling when out of stock". OpenCart's stock status text ("2-3 Days", "Pre-Order") and minimum order quantity have no Shopify equivalent and are not migrated.
    - **Description clean-up:** the HTML is tidied to match what Shopify's editor produces: HTML comments and `class` attributes are removed, `<font>` tags are removed (their text is kept, so the theme's font is used), `<b>`/`<i>` become `<strong>`/`<em>`, and line breaks and tabs are collapsed. The visible text doesn't change.
@@ -133,6 +135,14 @@ After a product is created or updated, its old OpenCart URLs get Shopify URL red
 
 When OpenCart's "Use SEO URLs" setting is on, the SEO forms are added too (`/imac`, `/desktops/mac`, `/desktops/mac/imac`, `/apple`), built the way OpenCart builds them. All paths start with the path of `OPENCART_STORE_URL`. Shopify matches query parameters in any order. Each redirect is created once and remembered in `migration.sqlite`; a path that already has a redirect made outside the migration is left alone with a warning. Redirects only take effect while the old path doesn't exist in Shopify, and can't be tried while the storefront is password-protected.
 
+### Main menu (`npm run menu`)
+
+Replaces the items of Shopify's main menu (handle `main-menu`) with OpenCart's header menu, so run it after the products are migrated. The categories are picked the way OpenCart's menu picks them: enabled top-level categories with "Show in top menu" on, each with its enabled subcategories as a dropdown, all in the default store, sorted by sort order and then name. Each item links to the category's collection.
+
+Categories in the menu that have no collection yet (because no migrated product is in them) get one first, created and published like any other, with redirects from their old category URLs. OpenCart's dropdown column count has no Shopify equivalent.
+
+The menu is compared with Shopify's first: if it's the same, nothing is changed, so the command can be rerun. Otherwise the whole menu is replaced, including items added in Shopify, and the old top-level items are logged. Shopify's footer and other menus aren't touched.
+
 `migration.sqlite` records which products, categories, description images and redirects have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
 
 ## Project structure
@@ -140,6 +150,7 @@ When OpenCart's "Use SEO URLs" setting is on, the SEO forms are added too (`/ima
 ```
 src/
   migrate.ts   Migrate one product (npm run migrate)
+  menu.ts      OpenCart category menu → Shopify main menu (npm run menu)
   index.ts     List products from both stores (npm start)
   env.ts       requireEnv() for reading environment variables
   opencart.ts  Database connection and product queries

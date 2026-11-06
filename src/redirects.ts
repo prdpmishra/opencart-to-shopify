@@ -39,21 +39,14 @@ export function buildRedirects(
     add(`index.php?route=product/product&product_id=${product.id}`, productTarget);
     if (seoUrls && product.seoKeyword) add(product.seoKeyword, productTarget);
 
-    for (const { category, handle } of collections) {
-        const collectionTarget = `/collections/${handle}`;
-        const path = category.pathIds.join("_");
-
+    for (const { category } of collections) {
         // A product opened from a category page carries the category path.
-        add(`index.php?route=product/product&path=${path}&product_id=${product.id}`, productTarget);
-        add(`index.php?route=product/category&path=${path}`, collectionTarget);
-
+        add(`index.php?route=product/product&path=${category.pathIds.join("_")}&product_id=${product.id}`, productTarget);
         // OpenCart only builds an SEO link when every category in the path has a keyword.
-        if (seoUrls && category.pathKeywords) {
-            const categoryPath = category.pathKeywords.join("/");
-            add(categoryPath, collectionTarget);
-            if (product.seoKeyword) add(`${categoryPath}/${product.seoKeyword}`, productTarget);
-        }
+        if (seoUrls && category.pathKeywords && product.seoKeyword)
+            add(`${category.pathKeywords.join("/")}/${product.seoKeyword}`, productTarget);
     }
+    redirects.push(...buildCategoryRedirects(collections, seoUrls));
 
     // Shopify has a built-in page per vendor; the manufacturer became the vendor.
     if (product.manufacturerId && product.manufacturer) {
@@ -64,6 +57,21 @@ export function buildRedirects(
 
     // The same category or manufacturer page can come up for several products.
     return redirects.filter((r, i) => redirects.findIndex((o) => o.path === r.path) === i);
+}
+
+// The old URLs of category pages, each pointing at its collection.
+export function buildCategoryRedirects(collections: ProductCollection[], seoUrls: boolean): Redirect[] {
+    const base = storePath();
+    const redirects: Redirect[] = [];
+
+    for (const { category, handle } of collections) {
+        const target = `/collections/${handle}`;
+        redirects.push({ path: `${base}index.php?route=product/category&path=${category.pathIds.join("_")}`, target });
+        if (seoUrls && category.pathKeywords)
+            redirects.push({ path: base + category.pathKeywords.join("/"), target });
+    }
+
+    return redirects;
 }
 
 // Creates the redirects Shopify doesn't have yet. Each one is remembered in
