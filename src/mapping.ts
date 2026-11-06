@@ -23,9 +23,42 @@ function getDb(): DatabaseSync {
             shopify_id TEXT NOT NULL,
             migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (entity_type, opencart_id)
+        );
+        CREATE TABLE IF NOT EXISTS file_mapping (
+            opencart_path TEXT PRIMARY KEY,
+            shopify_id TEXT NOT NULL,
+            shopify_url TEXT NOT NULL,
+            migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     `);
     return db;
+}
+
+// Files uploaded to Shopify Files, keyed by their path in OpenCart's image folder
+// (e.g. "catalog/demo/ipod_classic_3.jpg").
+export interface FileMapping {
+    opencart_path: string;
+    shopify_id: string;
+    shopify_url: string;
+    migrated_at: string;
+}
+
+export function findFileMapping(opencartPath: string): FileMapping | undefined {
+    return getDb()
+        .prepare("SELECT * FROM file_mapping WHERE opencart_path = ?")
+        .get(opencartPath) as FileMapping | undefined;
+}
+
+export function saveFileMapping(
+    opencartPath: string,
+    shopifyId: string,
+    shopifyUrl: string,
+): void {
+    getDb()
+        .prepare(
+            "INSERT INTO file_mapping (opencart_path, shopify_id, shopify_url) VALUES (?, ?, ?)",
+        )
+        .run(opencartPath, shopifyId, shopifyUrl);
 }
 
 export function findMapping(

@@ -252,8 +252,12 @@ const STAGED_UPLOADS_CREATE = `
 `;
 
 // Uploads a local image to Shopify's storage. The returned URL is used as a
-// file's originalSource in productSet.
-export async function uploadImage(filePath: string): Promise<string> {
+// file's originalSource: in productSet for product images ("PRODUCT_IMAGE"),
+// or in fileCreate for Shopify Files ("IMAGE").
+export async function uploadImage(
+    filePath: string,
+    resource: "PRODUCT_IMAGE" | "IMAGE" = "PRODUCT_IMAGE",
+): Promise<string> {
     const filename = basename(filePath);
     const mimeType = MIME_TYPES[extname(filename).toLowerCase()];
     if (!mimeType) throw new Error(`Unsupported image type: ${filename}`);
@@ -269,7 +273,7 @@ export async function uploadImage(filePath: string): Promise<string> {
                     filename,
                     mimeType,
                     httpMethod: "POST",
-                    resource: "PRODUCT_IMAGE",
+                    resource,
                     fileSize: String(data.length),
                 },
             ],
@@ -293,6 +297,84 @@ export async function uploadImage(filePath: string): Promise<string> {
         );
 
     return target.resourceUrl;
+}
+
+interface FileCreateResult {
+    fileCreate: {
+        files: { id: string }[];
+        userErrors: { field: string[] | null; message: string }[];
+    };
+}
+
+const FILE_CREATE = `
+    mutation CreateFile($files: [FileCreateInput!]!) {
+        fileCreate(files: $files) {
+            files {
+                id
+            }
+            userErrors {
+                field
+                message
+            }
+        }
+    }
+`;
+
+interface FileStatusResult {
+    node: {
+        fileStatus?: string;
+        image?: { url: string } | null;
+        fileErrors?: { message: string }[];
+    } | null;
+}
+
+const FILE_STATUS = `
+    query FileStatus($id: ID!) {
+        node(id: $id) {
+            ... on MediaImage {
+                fileStatus
+                image {
+                    url
+                }
+                fileErrors {
+                    message
+                }
+            }
+        }
+    }
+`;
+
+// Adds an uploaded image to Shopify Files and waits until it is processed.
+// Returns the file's ID and its CDN URL.
+export async function createImageFile(
+    resourceUrl: string,
+    timeoutMs = 60_000,
+): Promise<{ id: string; url: string }> {
+    const { fileCreate } = await graphql<FileCreateResult>(FILE_CREATE, {
+        files: [{ originalSource: resourceUrl, contentType: "IMAGE" }],
+    });
+    if (fileCreate.userErrors.length > 0)
+        throw new Error(fileCreate.userErrors.map((e) => e.message).join("; "));
+
+    const id = fileCreate.files[0]?.id;
+    if (!id) throw new Error("Shopify returned no file.");
+
+    // The CDN URL only exists once Shopify has processed the image.
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+        const { node } = await graphql<FileStatusResult>(FILE_STATUS, { id });
+
+        if (node?.fileStatus === "READY" && node.image)
+            return { id, url: node.image.url };
+        if (node?.fileStatus === "FAILED")
+            throw new Error(
+                `Shopify could not process the file: ${node.fileErrors?.map((e) => e.message).join("; ")}`,
+            );
+        if (Date.now() > deadline)
+            throw new Error(`File ${id} was not ready after ${timeoutMs / 1000} seconds.`);
+
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
 }
 
 export interface MediaResult {

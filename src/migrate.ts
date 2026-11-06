@@ -5,6 +5,7 @@ import type { Connection } from "mysql2/promise";
 import { requireEnv } from "./env.ts";
 import { connect, getProduct, getProductImages, type FullProduct } from "./opencart.ts";
 import { toProductSetInput, type ProductSetInput } from "./convert.ts";
+import { rewriteDescriptionImages } from "./description.ts";
 import { findMapping, saveMapping } from "./mapping.ts";
 import {
     adminProductUrl,
@@ -66,6 +67,9 @@ async function main() {
         connection = await connect();
         const product = await getProduct(connection, id);
         const input = toProductSetInput(product);
+
+        // Before comparing or sending, so the description has Shopify image URLs.
+        input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
 
         if (existing) await updateProduct(id, existing.shopify_id, input, dryRun);
         else await createProduct(connection, product, input, dryRun);
@@ -165,6 +169,13 @@ async function createProduct(
     }
 }
 
+// Shopify reformats HTML when saving it, e.g. it puts a newline between </p><p>.
+// Whitespace between tags doesn't change the page, so it's ignored here.
+function sameHtml(a: string, b: string): boolean {
+    const normalise = (html: string) => html.replace(/>\s+</g, "><");
+    return normalise(a) === normalise(b);
+}
+
 // Updates title, description, price and SKU from OpenCart.
 // Handle, status and images are left as they are in Shopify.
 async function updateProduct(
@@ -192,7 +203,7 @@ async function updateProduct(
     const changes: string[] = [];
     if (current.title !== input.title)
         changes.push(`title: "${current.title}" → "${input.title}"`);
-    if (current.descriptionHtml !== input.descriptionHtml)
+    if (!sameHtml(current.descriptionHtml, input.descriptionHtml))
         changes.push(
             `description: changed (${current.descriptionHtml.length} → ${input.descriptionHtml.length} characters)`,
         );
