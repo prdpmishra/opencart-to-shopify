@@ -185,6 +185,8 @@ export interface ShopifyProduct {
     onlineStore: boolean;
     variants: ShopifyVariant[];
     collections: { id: string; title: string }[];
+    /** The product's metafields in the "custom" namespace. */
+    metafields: { key: string; value: string; definitionId: string | null }[];
 }
 
 export interface ShopifyVariant {
@@ -216,6 +218,10 @@ interface ProductQueryResult {
         tags: string[];
         onlineStore: boolean;
         collections: { pageInfo: { hasNextPage: boolean }; nodes: { id: string; title: string }[] };
+        metafields: {
+            pageInfo: { hasNextPage: boolean };
+            nodes: { key: string; value: string; definition: { id: string } | null }[];
+        };
         variants: {
             pageInfo: { hasNextPage: boolean };
             nodes: {
@@ -260,6 +266,18 @@ const PRODUCT_QUERY = `
                 nodes {
                     id
                     title
+                }
+            }
+            metafields(namespace: "custom", first: 250) {
+                pageInfo {
+                    hasNextPage
+                }
+                nodes {
+                    key
+                    value
+                    definition {
+                        id
+                    }
                 }
             }
             variants(first: 250) {
@@ -318,10 +336,17 @@ export async function getShopifyProduct(
         throw new Error(`Shopify product ${productId} has more than 250 variants, which isn't supported.`);
     if (product.collections.pageInfo.hasNextPage)
         throw new Error(`Shopify product ${productId} is in more than 250 collections, which isn't supported.`);
+    if (product.metafields.pageInfo.hasNextPage)
+        throw new Error(`Shopify product ${productId} has more than 250 custom metafields, which isn't supported.`);
 
     return {
         ...product,
         collections: product.collections.nodes,
+        metafields: product.metafields.nodes.map((m) => ({
+            key: m.key,
+            value: m.value,
+            definitionId: m.definition?.id ?? null,
+        })),
         variants: product.variants.nodes.map((v) => ({
             id: v.id,
             selectedOptions: v.selectedOptions,
@@ -867,6 +892,40 @@ export async function createProductMetafieldDefinition(input: {
     throwUserErrors("Shopify rejected the metafield definition", metafieldDefinitionCreate.userErrors);
     if (!metafieldDefinitionCreate.createdDefinition) throw new Error("Shopify returned no metafield definition.");
     return metafieldDefinitionCreate.createdDefinition.id;
+}
+
+// Creates or updates these metafields on the product; others are left as they are.
+export async function setProductMetafields(
+    productId: string,
+    metafields: { namespace: string; key: string; type: string; value: string }[],
+): Promise<void> {
+    // metafieldsSet takes at most 25 at a time.
+    for (let i = 0; i < metafields.length; i += 25) {
+        const { metafieldsSet } = await graphql<{ metafieldsSet: UserErrorsResult }>(
+            `mutation SetMetafields($metafields: [MetafieldsSetInput!]!) {
+                metafieldsSet(metafields: $metafields) {
+                    userErrors { field message }
+                }
+            }`,
+            { metafields: metafields.slice(i, i + 25).map((m) => ({ ...m, ownerId: productId })) },
+        );
+        throwUserErrors("Shopify rejected the metafields", metafieldsSet.userErrors);
+    }
+}
+
+export async function deleteProductMetafields(
+    productId: string,
+    metafields: { namespace: string; key: string }[],
+): Promise<void> {
+    const { metafieldsDelete } = await graphql<{ metafieldsDelete: UserErrorsResult }>(
+        `mutation DeleteMetafields($metafields: [MetafieldIdentifierInput!]!) {
+            metafieldsDelete(metafields: $metafields) {
+                userErrors { field message }
+            }
+        }`,
+        { metafields: metafields.map((m) => ({ ...m, ownerId: productId })) },
+    );
+    throwUserErrors("Could not delete the metafields", metafieldsDelete.userErrors);
 }
 
 const URL_REDIRECT_CREATE = `

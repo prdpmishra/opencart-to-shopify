@@ -15,7 +15,14 @@ import {
     getSeoUrlsEnabled,
     type FullProduct,
 } from "./opencart.ts";
-import { sameHtml, shopifyWeightUnit, toMetafields, toProductSetInput, type ProductSetInput } from "./convert.ts";
+import {
+    sameHtml,
+    shopifyWeightUnit,
+    toMetafields,
+    toProductSetInput,
+    type ProductMetafield,
+    type ProductSetInput,
+} from "./convert.ts";
 import { prepareMetafieldDefinitions } from "./attributes.ts";
 import { prepareCollections, type ProductCollection } from "./collections.ts";
 import { rewriteDescriptionImages } from "./description.ts";
@@ -24,11 +31,13 @@ import { buildRedirects, createRedirects } from "./redirects.ts";
 import { findMapping, isMappedShopifyId, saveMapping } from "./mapping.ts";
 import {
     adminProductUrl,
+    deleteProductMetafields,
     getShopTaxesIncluded,
     getShopifyProduct,
     publishToOnlineStore,
     saveProduct,
     setAvailableQuantity,
+    setProductMetafields,
     type ShopifyVariant,
     uploadImage,
     waitForImages,
@@ -235,10 +244,6 @@ async function migrateProduct(
         toMetafields(id, await getProductAttributes(connection, id)),
         dryRun,
     );
-    if (dryRun && metafields.length > 0)
-        console.log(
-            `Metafields:\n${metafields.map((m) => `  ${m.namespace}.${m.key} ("${m.name}", group "${m.group}") = "${m.value}"`).join("\n")}`,
-        );
 
     // Each category becomes a collection; missing ones are created first.
     const collections = await prepareCollections(
@@ -247,7 +252,8 @@ async function migrateProduct(
     );
 
     let outcome: { result: Result; handle: string };
-    if (existing) outcome = await updateProduct(id, existing.shopify_id, input, collections, locationId, dryRun);
+    if (existing)
+        outcome = await updateProduct(id, existing.shopify_id, input, collections, metafields, locationId, dryRun);
     else {
         input.collections = collections.flatMap((c) => (c.id ? [c.id] : []));
         if (metafields.length > 0)
@@ -375,12 +381,13 @@ function variantKey(options: { name: string; value: string }[]): string {
 }
 
 // Updates the product from OpenCart: title, description, status, SEO, vendor,
-// tags, collections, variants and inventory. Handle and images are left as they are.
+// tags, collections, metafields, variants and inventory. Handle and images are left as they are.
 async function updateProduct(
     id: number,
     shopifyId: string,
     input: ProductSetInput,
     collections: ProductCollection[],
+    metafields: ProductMetafield[],
     locationId: string,
     dryRun: boolean,
 ): Promise<{ result: Result; handle: string }> {
@@ -500,6 +507,24 @@ async function updateProduct(
         productChanged = true;
     }
 
+    // Metafields: new and changed values are set. Values of OpenCart attributes the
+    // product no longer has are deleted; metafields added by hand in Shopify are kept.
+    const metafieldsToSet: ProductMetafield[] = [];
+    for (const metafield of metafields) {
+        const currentValue = current.metafields.find((m) => m.key === metafield.key)?.value;
+        if (currentValue === metafield.value) continue;
+        const from = currentValue === undefined ? "none" : `"${currentValue}"`;
+        changes.push(`metafield custom.${metafield.key}: ${from} → "${metafield.value}"`);
+        metafieldsToSet.push(metafield);
+    }
+    const metafieldsToDelete = current.metafields.filter(
+        (m) =>
+            !metafields.some((wanted) => wanted.key === m.key) &&
+            m.definitionId !== null &&
+            isMappedShopifyId("attribute", m.definitionId),
+    );
+    for (const m of metafieldsToDelete) changes.push(`metafield custom.${m.key}: "${m.value}" → deleted`);
+
     if (changes.length === 0) {
         console.log(`Product ${id} is already up to date in Shopify (${shopifyId}).`);
         return { result: "up to date", handle: current.handle };
@@ -523,6 +548,17 @@ async function updateProduct(
 
     for (const { variant, quantity } of quantityUpdates)
         await setAvailableQuantity(variant.inventoryItemId, locationId, quantity, variant.available);
+
+    if (metafieldsToSet.length > 0)
+        await setProductMetafields(
+            shopifyId,
+            metafieldsToSet.map(({ namespace, key, type, value }) => ({ namespace, key, type, value })),
+        );
+    if (metafieldsToDelete.length > 0)
+        await deleteProductMetafields(
+            shopifyId,
+            metafieldsToDelete.map((m) => ({ namespace: "custom", key: m.key })),
+        );
 
     if (publish) await publishToOnlineStore(shopifyId);
 

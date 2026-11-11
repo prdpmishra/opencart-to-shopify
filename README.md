@@ -2,7 +2,7 @@
 
 Migrates products from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts.
+For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts.
 
 ## Requirements
 
@@ -97,6 +97,7 @@ Shopify limits how much API work an app can do per second. When a request is ref
    - **SEO, vendor, tags:** the meta title and meta description become Shopify's SEO title and description (tabs and extra spaces removed; empty ones fall back to the product title and description). The manufacturer becomes the vendor, and OpenCart's comma-separated tags become Shopify tags (duplicates that differ only in upper/lower case are merged, as Shopify does). Meta keywords have no Shopify equivalent and are skipped.
    - **Weight and shipping:** a variant's weight is the product weight plus its option values' weights, in the product's unit (kg, g, lb or oz; another unit gives a warning). OpenCart's "Requires Shipping" becomes "This is a physical product". Length, width and height have no Shopify product field (parcel sizes are shipping packages) and give a warning.
    - **Categories:** each of the product's OpenCart categories becomes a manual Shopify collection, created the first time a product in it is migrated (empty categories only get one through `npm run menu`, below). Title, description (cleaned, images moved to Shopify Files) and image come from the category, and the handle from its SEO keyword, like products. Collections of enabled categories are published to the Online Store, also on later runs if one isn't published yet. Shopify collections can't be nested, so the category tree isn't kept. Each collection is remembered in `migration.sqlite`.
+   - **Attributes:** OpenCart's attributes (the "Specification" tab, e.g. "No. of Cores: 4") become product metafields in the `custom` namespace, the merchant's own, as Shopify admin creates them. Each attribute gets a metafield definition the first time a product with it is migrated: the key comes from the attribute name (`No. of Cores` → `custom.no_of_cores`), the name stays as it is, and the OpenCart attribute group goes into the definition's description, since Shopify has no groups. Definitions are single-line text (OpenCart's values are free text such as `100mhz`), pinned so they show on the product page in admin, and readable by the theme. Each definition is remembered in `migration.sqlite` and keeps its key if the attribute is renamed later. A definition with the same key that already exists in Shopify is used if it has the same type; two attributes that would get the same key stop the run. Empty values are skipped. Themes don't show metafields by themselves: add them in the theme editor ("dynamic source") or use them as filters with the Search & Discovery app.
    - **Variants:** select and radio options (up to 3, Shopify's limit) become Shopify options, and every combination of their values becomes a variant. Products without them get Shopify's single `Default Title` variant. Other option types (checkbox, text, textarea, date, time, date & time, file) are customer inputs with no standard Shopify equivalent: they are skipped with a warning, which also says when the option was required.
    - **Stock:** OpenCart's "Subtract Stock" becomes Shopify's "Track quantity". For tracked products, the quantity becomes the available quantity at `SHOPIFY_LOCATION_ID`. OpenCart tracks stock per product and per option value, not per combination, so a variant gets the lowest quantity that OpenCart tracks for it (the product's and each chosen value's). OpenCart's "allow checkout when out of stock" store setting becomes "Continue selling when out of stock". OpenCart's stock status text ("2-3 Days", "Pre-Order") and minimum order quantity have no Shopify equivalent and are not migrated.
    - **Description clean-up:** the HTML is tidied to match what Shopify's editor produces: HTML comments and `class` attributes are removed, `<font>` tags are removed (their text is kept, so the theme's font is used), `<b>`/`<i>` become `<strong>`/`<em>`, and line breaks and tabs are collapsed. The visible text doesn't change.
@@ -104,13 +105,13 @@ Shopify limits how much API work an app can do per second. When a request is ref
 4. Finds the product's images in `OPENCART_IMAGE_DIR`: the main image first, then the additional images by sort order. Missing files are skipped with a warning.
 5. With `--dry-run`, prints the converted product and the images it found, then stops. Shopify is not called and nothing is uploaded or saved.
 6. Uploads each image to Shopify (staged upload). A failed upload is skipped with a warning.
-7. Creates the product with its images and collections in one `productSet` call, then publishes it to the Online Store if it's active.
+7. Creates the product with its images, collections and metafields in one `productSet` call, then publishes it to the Online Store if it's active.
 8. Saves the OpenCart → Shopify ID mapping in `migration.sqlite`, then prints the admin link.
 9. Waits up to a minute for Shopify to process the images and prints each one's status (`READY` or `FAILED`).
 
 ### Updating a migrated product (`--update`)
 
-OpenCart is the source of truth: the title, description, status, SEO, vendor, tags, variants, prices, SKUs, weights and stock in Shopify are overwritten with OpenCart's values. An active product that isn't on the Online Store yet is published.
+OpenCart is the source of truth: the title, description, status, SEO, vendor, tags, attribute metafields, variants, prices, SKUs, weights and stock in Shopify are overwritten with OpenCart's values. An active product that isn't on the Online Store yet is published.
 
 > **Note:** this includes the available quantity. That's right while OpenCart is the live shop, but once Shopify takes orders, `--update` would overwrite stock that Shopify has reduced.
 
@@ -119,7 +120,8 @@ OpenCart is the source of truth: the title, description, status, SEO, vendor, ta
 3. Prints each difference, e.g. `variant "Medium": price 99.00 → 110.00`. If nothing differs, it says the product is up to date and doesn't call Shopify. Whitespace between HTML tags is ignored when comparing descriptions, because Shopify reformats HTML when saving it.
 4. With `--dry-run`, stops after printing the differences.
 5. Updates the product, its variants and its collections with `productSet`. Only collections created from OpenCart categories are added or removed; collections a product was added to by hand in Shopify (e.g. the home page) are kept. The title and description of existing collections are updated from their categories too.
-6. Sets the available quantity of each changed existing variant with `inventorySetQuantities`, passing the quantity it just read as `changeFromQuantity`. If the stock changed in Shopify in the meantime (e.g. a sale), Shopify refuses instead of overwriting it. If the item isn't stocked at the location yet, it is activated there.
+6. Sets new and changed attribute metafields with `metafieldsSet`, and deletes the values of attributes the product no longer has in OpenCart with `metafieldsDelete`. Only metafields of migrated attributes are deleted; metafields added in Shopify are kept.
+7. Sets the available quantity of each changed existing variant with `inventorySetQuantities`, passing the quantity it just read as `changeFromQuantity`. If the stock changed in Shopify in the meantime (e.g. a sale), Shopify refuses instead of overwriting it. If the item isn't stocked at the location yet, it is activated there.
 
 The handle and gallery images are not changed, so product URLs stay the same. Status does follow OpenCart: a product disabled in OpenCart becomes a draft in Shopify. Changes to the gallery images in OpenCart are not synced; images inside the description are.
 
@@ -160,7 +162,7 @@ Categories in the menu that have no collection yet (because no migrated product 
 
 The menu is compared with Shopify's first: if it's the same, nothing is changed, so the command can be rerun. Otherwise the whole menu is replaced, including items added in Shopify, and the old top-level items are logged. Shopify's footer and other menus aren't touched.
 
-`migration.sqlite` records which products, categories, description images, redirects and discounts have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
+`migration.sqlite` records which products, categories, attributes, description images, redirects and discounts have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
 
 ## Project structure
 
@@ -174,8 +176,9 @@ src/
   convert.ts   OpenCart product → Shopify productSet input, handle building
   shopify.ts   Access token, graphql() helper and product creation
   collections.ts  OpenCart categories → Shopify collections
+  attributes.ts   OpenCart attributes → Shopify metafield definitions
   discounts.ts OpenCart quantity discounts → Shopify automatic discounts
   description.ts  Images inside descriptions → Shopify Files
-  mapping.ts   SQLite mapping of migrated products, categories, files, redirects and discounts
+  mapping.ts   SQLite mapping of migrated products, categories, attributes, files, redirects and discounts
   redirects.ts Old OpenCart URLs → Shopify URL redirects
 ```
