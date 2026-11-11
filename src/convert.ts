@@ -1,5 +1,14 @@
 import { decode } from "he";
-import type { Attribute, FullProduct, OptionValue, ProductOption, Special } from "./opencart.ts";
+import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js";
+import type {
+    Attribute,
+    Customer,
+    CustomerAddress,
+    FullProduct,
+    OptionValue,
+    ProductOption,
+    Special,
+} from "./opencart.ts";
 
 export type WeightUnit = "KILOGRAMS" | "GRAMS" | "POUNDS" | "OUNCES";
 
@@ -322,4 +331,64 @@ export function buildHandle(
     const fallback = `${kind}-${product.id}`;
     console.log(`${label}: name has no usable characters, using handle "${fallback}"`);
     return fallback;
+}
+
+// ── Customers ──
+
+// The parts of Shopify's CustomerSetInput that we fill in.
+export interface CustomerInput {
+    email: string;
+    firstName: string;
+    lastName: string;
+    phone: string | null; // E.164, e.g. "+31612345678"; null leaves it empty
+    note: string;
+    tags: string[];
+}
+
+// Shopify's MailingAddressInput.
+export interface AddressInput {
+    firstName: string;
+    lastName: string;
+    company: string;
+    address1: string;
+    address2: string;
+    city: string;
+    zip: string;
+    countryCode: string;
+    provinceCode: string;
+}
+
+// Turns a phone number as typed in OpenCart into E.164 ("+31612345678"), which
+// Shopify requires. Numbers without "+" are read as numbers of the given country.
+// Returns null if it isn't a valid number.
+export function toE164(telephone: string, countryCode: string | undefined): string | null {
+    const phone = parsePhoneNumberFromString(telephone.trim(), (countryCode || undefined) as CountryCode | undefined);
+    return phone?.isValid() ? phone.number : null;
+}
+
+export function toCustomerInput(customer: Customer): CustomerInput {
+    const defaultAddress = customer.addresses.find((a) => a.id === customer.defaultAddressId);
+    return {
+        // Shopify matches emails without regard to case; lowercase keeps comparisons simple.
+        email: customer.email.trim().toLowerCase(),
+        firstName: tidyText(customer.firstName),
+        lastName: tidyText(customer.lastName),
+        phone: toE164(customer.telephone, defaultAddress?.countryCode),
+        note: `Migrated from OpenCart: customer #${customer.id}, registered ${customer.dateAdded}.`,
+        tags: customer.group ? [customer.group] : [],
+    };
+}
+
+export function toAddressInput(address: CustomerAddress): AddressInput {
+    return {
+        firstName: tidyText(address.firstName),
+        lastName: tidyText(address.lastName),
+        company: tidyText(address.company),
+        address1: tidyText(address.address1),
+        address2: tidyText(address.address2),
+        city: tidyText(address.city),
+        zip: tidyText(address.postcode),
+        countryCode: address.countryCode,
+        provinceCode: address.zoneCode,
+    };
 }

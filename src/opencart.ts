@@ -637,3 +637,132 @@ export async function getSeoUrlsEnabled(connection: Connection): Promise<boolean
     );
     return rows[0]?.value === "1";
 }
+
+export interface CustomerAddress {
+    id: number;
+    firstName: string;
+    lastName: string;
+    company: string;
+    address1: string;
+    address2: string;
+    city: string;
+    postcode: string;
+    /** ISO 3166-1 alpha-2, e.g. "NL"; empty if the country was deleted. */
+    countryCode: string;
+    /** OpenCart's zone code, e.g. "UP"; empty if none. */
+    zoneCode: string;
+    zoneName: string;
+}
+
+export interface Customer {
+    id: number;
+    firstName: string;
+    lastName: string;
+    email: string;
+    telephone: string;
+    newsletter: boolean;
+    enabled: boolean;
+    /** The customer group name, or null for the store's default group. */
+    group: string | null;
+    /** e.g. "2026-02-19" */
+    dateAdded: string;
+    addresses: CustomerAddress[];
+    /** The default address's ID, if it is one of the customer's addresses. */
+    defaultAddressId: number | null;
+}
+
+interface CustomerRow extends RowDataPacket {
+    customer_id: number;
+    firstname: string;
+    lastname: string;
+    email: string;
+    telephone: string;
+    newsletter: number;
+    status: number;
+    address_id: number;
+    group_name: string | null;
+    is_default_group: number;
+    date_added: string;
+}
+
+interface AddressRow extends RowDataPacket {
+    address_id: number;
+    firstname: string;
+    lastname: string;
+    company: string;
+    address_1: string;
+    address_2: string;
+    city: string;
+    postcode: string;
+    iso_code_2: string | null;
+    zone_code: string | null;
+    zone_name: string | null;
+}
+
+export async function getCustomer(connection: Connection, id: number): Promise<Customer> {
+    const { dbPrefix, languageId } = getSettings();
+
+    // The date is formatted in SQL, so the JavaScript time zone can't shift it.
+    const [rows] = await connection.execute<CustomerRow[]>(
+        `SELECT c.customer_id, c.firstname, c.lastname, c.email, c.telephone,
+            c.newsletter, c.status, c.address_id, cgd.name AS group_name,
+            c.customer_group_id = (SELECT value FROM \`${dbPrefix}setting\`
+                WHERE store_id = 0 AND \`key\` = 'config_customer_group_id') AS is_default_group,
+            DATE_FORMAT(c.date_added, '%Y-%m-%d') AS date_added
+        FROM \`${dbPrefix}customer\` c
+        LEFT JOIN \`${dbPrefix}customer_group_description\` cgd
+            ON cgd.customer_group_id = c.customer_group_id AND cgd.language_id = ?
+        WHERE c.customer_id = ?`,
+        [languageId, id],
+    );
+    const row = rows[0];
+    if (!row) throw new Error(`OpenCart has no customer with ID ${id}.`);
+
+    const [addressRows] = await connection.execute<AddressRow[]>(
+        `SELECT a.address_id, a.firstname, a.lastname, a.company, a.address_1, a.address_2,
+            a.city, a.postcode, co.iso_code_2, z.code AS zone_code, z.name AS zone_name
+        FROM \`${dbPrefix}address\` a
+        LEFT JOIN \`${dbPrefix}country\` co ON co.country_id = a.country_id
+        LEFT JOIN \`${dbPrefix}zone\` z ON z.zone_id = a.zone_id
+        WHERE a.customer_id = ?
+        ORDER BY a.address_id`,
+        [id],
+    );
+
+    const addresses = addressRows.map((a) => ({
+        id: a.address_id,
+        firstName: decode(a.firstname),
+        lastName: decode(a.lastname),
+        company: decode(a.company),
+        address1: decode(a.address_1),
+        address2: decode(a.address_2),
+        city: decode(a.city),
+        postcode: decode(a.postcode),
+        countryCode: a.iso_code_2 ?? "",
+        zoneCode: a.zone_code ?? "",
+        zoneName: decode(a.zone_name ?? ""),
+    }));
+
+    return {
+        id: row.customer_id,
+        firstName: decode(row.firstname),
+        lastName: decode(row.lastname),
+        email: row.email,
+        telephone: row.telephone,
+        newsletter: row.newsletter === 1,
+        enabled: row.status === 1,
+        group: row.is_default_group ? null : decode(row.group_name ?? ""),
+        dateAdded: row.date_added,
+        addresses,
+        defaultAddressId: addresses.some((a) => a.id === row.address_id) ? row.address_id : null,
+    };
+}
+
+// Every customer ID in OpenCart, in order.
+export async function getCustomerIds(connection: Connection): Promise<number[]> {
+    const { dbPrefix } = getSettings();
+    const [rows] = await connection.execute<RowDataPacket[]>(
+        `SELECT customer_id FROM \`${dbPrefix}customer\` ORDER BY customer_id`,
+    );
+    return rows.map((row) => row.customer_id as number);
+}

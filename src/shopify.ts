@@ -1225,3 +1225,18 @@ export async function getAutomaticDiscount(id: string): Promise<AutomaticDiscoun
         endsAt: d.endsAt,
     };
 }
+
+// Finds a Shopify customer by email (Shopify ignores upper/lower case).
+export async function findCustomerIdByEmail(email: string): Promise<string | null> {
+    const data = await graphql<{ customerByIdentifier: { id: string } | null }>(
+        `query ($email: String!) { customerByIdentifier(identifier: { emailAddress: $email }) { id } }`,
+        { email },
+    );
+    return data.customerByIdentifier?.id ?? null;
+}
+
+// "gid://shopify/Customer/123" → the customer's page in Shopify admin.
+export function adminCustomerUrl(customerId: string): string {
+    const store = requireEnv("SHOPIFY_SHOP").replace(/\.myshopify\.com$/, "");
+    return `https://admin.shopify.com/store/${store}/customers/${customerId.split("/").pop()}`;
+}

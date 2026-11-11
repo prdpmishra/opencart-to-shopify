@@ -9,6 +9,7 @@
         "start": "tsx --env-file=.env src/index.ts",
         "migrate": "tsx --env-file=.env src/migrate.ts",
         "menu": "tsx --env-file=.env src/menu.ts",
+        "customers": "tsx --env-file=.env src/customers.ts",
         "typecheck": "tsc --noEmit"
     },
     "keywords": [],
@@ -16,6 +17,7 @@
     "license": "ISC",
     "dependencies": {
         "he": "^2.0.0",
+        "libphonenumber-js": "^1.13.16",
         "mysql2": "^3.24.6"
     },
     "devDependencies": {
