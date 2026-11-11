@@ -159,3 +159,9 @@ export function deleteDiscountMapping(productId: number, quantity: number): void
         .prepare("DELETE FROM discount_mapping WHERE product_id = ? AND quantity = ?")
         .run(productId, quantity);
 }
+
+export function deleteMappingByShopifyId(entityType: EntityType, shopifyId: string): void {
+    getDb()
+        .prepare("DELETE FROM mapping WHERE entity_type = ? AND shopify_id = ?")
+        .run(entityType, shopifyId);
+}

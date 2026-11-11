@@ -1241,22 +1241,87 @@ export function adminCustomerUrl(customerId: string): string {
     return `https://admin.shopify.com/store/${store}/customers/${customerId.split("/").pop()}`;
 }
 
-// Creates a customer, or updates the one that already has this email.
-export async function setCustomer(input: CustomerInput): Promise<string> {
+// Creates a customer, or updates the one that already has this email. With an
+// ID, updates that customer (and can change its email).
+export async function setCustomer(input: CustomerInput, id?: string): Promise<string> {
     const { customerSet } = await graphql<{
         customerSet: { customer: { id: string } | null } & UserErrorsResult;
     }>(
-        `mutation ($input: CustomerSetInput!, $email: String!) {
-            customerSet(identifier: { email: $email }, input: $input) {
+        `mutation ($input: CustomerSetInput!, $identifier: CustomerSetIdentifiers!) {
+            customerSet(identifier: $identifier, input: $input) {
                 customer { id }
                 userErrors { field message }
             }
         }`,
-        { input, email: input.email },
+        { input, identifier: id ? { id } : { email: input.email } },
     );
     throwUserErrors("Shopify rejected the customer", customerSet.userErrors);
     if (!customerSet.customer) throw new Error("Shopify returned no customer.");
     return customerSet.customer.id;
+}
+
+export interface ShopifyAddress {
+    id: string;
+    firstName: string | null;
+    lastName: string | null;
+    company: string | null;
+    address1: string | null;
+    address2: string | null;
+    city: string | null;
+    zip: string | null;
+    countryCode: string | null;
+    provinceCode: string | null;
+}
+
+export interface ShopifyCustomer {
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    phone: string | null;
+    note: string | null;
+    tags: string[];
+    // SUBSCRIBED, NOT_SUBSCRIBED, UNSUBSCRIBED, PENDING, ...
+    marketingState: string | null;
+    defaultAddressId: string | null;
+    addresses: ShopifyAddress[];
+}
+
+export async function getShopifyCustomer(id: string): Promise<ShopifyCustomer | null> {
+    const { customer } = await graphql<{
+        customer:
+            | (Omit<ShopifyCustomer, "email" | "phone" | "marketingState" | "defaultAddressId" | "addresses"> & {
+                  defaultEmailAddress: { emailAddress: string; marketingState: string } | null;
+                  defaultPhoneNumber: { phoneNumber: string } | null;
+                  defaultAddress: { id: string } | null;
+                  addressesV2: { nodes: ShopifyAddress[] };
+              })
+            | null;
+    }>(
+        `query ($id: ID!) {
+            customer(id: $id) {
+                firstName lastName note tags
+                defaultEmailAddress { emailAddress marketingState }
+                defaultPhoneNumber { phoneNumber }
+                defaultAddress { id }
+                addressesV2(first: 250) {
+                    nodes { id firstName lastName company address1 address2 city zip countryCode: countryCodeV2 provinceCode }
+                }
+            }
+        }`,
+        { id },
+    );
+    if (!customer) return null;
+    return {
+        email: customer.defaultEmailAddress?.emailAddress ?? null,
+        firstName: customer.firstName,
+        lastName: customer.lastName,
+        phone: customer.defaultPhoneNumber?.phoneNumber ?? null,
+        note: customer.note,
+        tags: customer.tags,
+        marketingState: customer.defaultEmailAddress?.marketingState ?? null,
+        defaultAddressId: customer.defaultAddress?.id ?? null,
+        addresses: customer.addressesV2.nodes,
+    };
 }
 
 export async function createCustomerAddress(
@@ -1280,9 +1345,42 @@ export async function createCustomerAddress(
     return customerAddressCreate.address.id;
 }
 
-// Records that the customer agreed to marketing emails (OpenCart's newsletter box).
+export async function updateCustomerAddress(customerId: string, addressId: string, address: AddressInput): Promise<void> {
+    const { customerAddressUpdate } = await graphql<{ customerAddressUpdate: UserErrorsResult }>(
+        `mutation ($customerId: ID!, $addressId: ID!, $address: MailingAddressInput!) {
+            customerAddressUpdate(customerId: $customerId, addressId: $addressId, address: $address) {
+                userErrors { field message }
+            }
+        }`,
+        { customerId, addressId, address },
+    );
+    throwUserErrors("Shopify rejected the address update", customerAddressUpdate.userErrors);
+}
+
+export async function deleteCustomerAddress(customerId: string, addressId: string): Promise<void> {
+    const { customerAddressDelete } = await graphql<{ customerAddressDelete: UserErrorsResult }>(
+        `mutation ($customerId: ID!, $addressId: ID!) {
+            customerAddressDelete(customerId: $customerId, addressId: $addressId) { userErrors { field message } }
+        }`,
+        { customerId, addressId },
+    );
+    throwUserErrors("Shopify rejected deleting the address", customerAddressDelete.userErrors);
+}
+
+export async function setDefaultCustomerAddress(customerId: string, addressId: string): Promise<void> {
+    const { customerUpdateDefaultAddress } = await graphql<{ customerUpdateDefaultAddress: UserErrorsResult }>(
+        `mutation ($customerId: ID!, $addressId: ID!) {
+            customerUpdateDefaultAddress(customerId: $customerId, addressId: $addressId) { userErrors { field message } }
+        }`,
+        { customerId, addressId },
+    );
+    throwUserErrors("Shopify rejected the default address", customerUpdateDefaultAddress.userErrors);
+}
+
+// Records whether the customer agreed to marketing emails (OpenCart's newsletter box).
 // "Single opt-in": they ticked a box, without confirming by email.
-export async function subscribeToEmailMarketing(customerId: string, since: string): Promise<void> {
+// "since" is when they agreed; Shopify uses the current time if it is left out.
+export async function setEmailMarketing(customerId: string, subscribed: boolean, since?: string): Promise<void> {
     const { customerEmailMarketingConsentUpdate } = await graphql<{
         customerEmailMarketingConsentUpdate: UserErrorsResult;
     }>(
@@ -1293,9 +1391,9 @@ export async function subscribeToEmailMarketing(customerId: string, since: strin
             input: {
                 customerId,
                 emailMarketingConsent: {
-                    marketingState: "SUBSCRIBED",
+                    marketingState: subscribed ? "SUBSCRIBED" : "UNSUBSCRIBED",
                     marketingOptInLevel: "SINGLE_OPT_IN",
-                    consentUpdatedAt: since,
+                    ...(since ? { consentUpdatedAt: since } : {}),
                 },
             },
         },

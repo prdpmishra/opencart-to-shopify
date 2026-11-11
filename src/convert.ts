@@ -392,3 +392,24 @@ export function toAddressInput(address: CustomerAddress): AddressInput {
         provinceCode: address.zoneCode || undefined,
     };
 }
+
+// Whether an address in Shopify already matches the wanted one, allowing for
+// what Shopify changes when it saves an address:
+// - empty fields come back as null;
+// - postcodes are reformatted to the country's style ("8225BZ" → "8225 BZ");
+// - a province code is dropped for countries without provinces in Shopify
+//   (e.g. OpenCart's Dutch zones), so a missing one in Shopify isn't a difference.
+export function sameAddress(
+    wanted: AddressInput,
+    current: { [K in keyof AddressInput]-?: string | null },
+): boolean {
+    const text = (value: string | null | undefined) => (value ?? "").trim();
+    const zip = (value: string | null | undefined) => text(value).replace(/\s+/g, "").toUpperCase();
+    return (
+        (["firstName", "lastName", "company", "address1", "address2", "city", "countryCode"] as const).every(
+            (field) => text(wanted[field]) === text(current[field]),
+        ) &&
+        zip(wanted.zip) === zip(current.zip) &&
+        (current.provinceCode === null || text(wanted.provinceCode) === current.provinceCode)
+    );
+}
