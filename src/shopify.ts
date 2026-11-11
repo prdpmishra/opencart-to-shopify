@@ -802,6 +802,73 @@ export async function publishToOnlineStore(id: string): Promise<void> {
     throwUserErrors("Could not publish to the Online Store", publishablePublish.userErrors);
 }
 
+export interface MetafieldDefinition {
+    id: string;
+    namespace: string;
+    key: string;
+    name: string;
+    type: { name: string };
+}
+
+const METAFIELD_DEFINITION_FIELDS = `id namespace key name type { name }`;
+
+// Returns null if the definition doesn't exist (e.g. it was deleted in Shopify).
+export async function getMetafieldDefinition(id: string): Promise<MetafieldDefinition | null> {
+    const { node } = await graphql<{ node: MetafieldDefinition | null }>(
+        `query GetMetafieldDefinition($id: ID!) {
+            node(id: $id) { ... on MetafieldDefinition { ${METAFIELD_DEFINITION_FIELDS} } }
+        }`,
+        { id },
+    );
+    return node;
+}
+
+// The product metafield definition with this namespace and key, or null.
+export async function findProductMetafieldDefinition(
+    namespace: string,
+    key: string,
+): Promise<MetafieldDefinition | null> {
+    const { metafieldDefinition } = await graphql<{ metafieldDefinition: MetafieldDefinition | null }>(
+        `query FindMetafieldDefinition($identifier: MetafieldDefinitionIdentifierInput!) {
+            metafieldDefinition(identifier: $identifier) { ${METAFIELD_DEFINITION_FIELDS} }
+        }`,
+        { identifier: { ownerType: "PRODUCT", namespace, key } },
+    );
+    return metafieldDefinition;
+}
+
+// A product metafield definition as Shopify admin creates one under Settings →
+// Custom data: pinned (shown on the product page) and readable by the theme.
+export async function createProductMetafieldDefinition(input: {
+    namespace: string;
+    key: string;
+    name: string;
+    description: string;
+    type: string;
+}): Promise<string> {
+    const { metafieldDefinitionCreate } = await graphql<{
+        metafieldDefinitionCreate: { createdDefinition: { id: string } | null } & UserErrorsResult;
+    }>(
+        `mutation CreateMetafieldDefinition($definition: MetafieldDefinitionInput!) {
+            metafieldDefinitionCreate(definition: $definition) {
+                createdDefinition { id }
+                userErrors { field message }
+            }
+        }`,
+        {
+            definition: {
+                ...input,
+                ownerType: "PRODUCT",
+                pin: true,
+                access: { storefront: "PUBLIC_READ" },
+            },
+        },
+    );
+    throwUserErrors("Shopify rejected the metafield definition", metafieldDefinitionCreate.userErrors);
+    if (!metafieldDefinitionCreate.createdDefinition) throw new Error("Shopify returned no metafield definition.");
+    return metafieldDefinitionCreate.createdDefinition.id;
+}
+
 const URL_REDIRECT_CREATE = `
     mutation UrlRedirectCreate($urlRedirect: UrlRedirectInput!) {
         urlRedirectCreate(urlRedirect: $urlRedirect) {

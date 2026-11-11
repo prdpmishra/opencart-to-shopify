@@ -41,6 +41,8 @@ export interface ProductSetInput {
     }[];
     // The product's complete list of collections; productSet replaces the existing list.
     collections?: string[];
+    // Only sent when creating; updates sync them separately.
+    metafields?: { namespace: string; key: string; type: string; value: string }[];
     files?: { originalSource: string; alt: string; contentType: "IMAGE" }[];
 }
 

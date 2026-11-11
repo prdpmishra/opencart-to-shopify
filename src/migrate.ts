@@ -16,6 +16,7 @@ import {
     type FullProduct,
 } from "./opencart.ts";
 import { sameHtml, shopifyWeightUnit, toMetafields, toProductSetInput, type ProductSetInput } from "./convert.ts";
+import { prepareMetafieldDefinitions } from "./attributes.ts";
 import { prepareCollections, type ProductCollection } from "./collections.ts";
 import { rewriteDescriptionImages } from "./description.ts";
 import { syncDiscounts } from "./discounts.ts";
@@ -228,8 +229,12 @@ async function migrateProduct(
     // Before comparing or sending, so the description has Shopify image URLs.
     input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
 
-    // Attributes (OpenCart's "Specification" tab) → product metafields.
-    const metafields = toMetafields(id, await getProductAttributes(connection, id));
+    // Attributes (OpenCart's "Specification" tab) → product metafields; missing
+    // definitions are created first.
+    const metafields = await prepareMetafieldDefinitions(
+        toMetafields(id, await getProductAttributes(connection, id)),
+        dryRun,
+    );
     if (dryRun && metafields.length > 0)
         console.log(
             `Metafields:\n${metafields.map((m) => `  ${m.namespace}.${m.key} ("${m.name}", group "${m.group}") = "${m.value}"`).join("\n")}`,
@@ -245,6 +250,8 @@ async function migrateProduct(
     if (existing) outcome = await updateProduct(id, existing.shopify_id, input, collections, locationId, dryRun);
     else {
         input.collections = collections.flatMap((c) => (c.id ? [c.id] : []));
+        if (metafields.length > 0)
+            input.metafields = metafields.map(({ namespace, key, type, value }) => ({ namespace, key, type, value }));
         outcome = await createProduct(connection, product, input, dryRun);
     }
 
