@@ -441,6 +441,49 @@ export async function getPriceRules(
     return { special, discounts, notMigrated };
 }
 
+export interface Attribute {
+    id: number;
+    name: string;
+    /** The attribute group, e.g. "Processor"; Shopify has no groups. */
+    group: string;
+    /** The product's value, e.g. "6.1 inch". */
+    text: string;
+}
+
+interface AttributeRow extends RowDataPacket {
+    attribute_id: number;
+    name: string | null;
+    group_name: string | null;
+    text: string;
+}
+
+// The product's attributes (OpenCart's "Specification" tab), in the order OpenCart
+// shows them: by group, then attribute, each by sort order and then name.
+export async function getProductAttributes(connection: Connection, id: number): Promise<Attribute[]> {
+    const { dbPrefix, languageId } = getSettings();
+
+    const [rows] = await connection.execute<AttributeRow[]>(
+        `SELECT a.attribute_id, ad.name, agd.name AS group_name, pa.text
+        FROM \`${dbPrefix}product_attribute\` pa
+        JOIN \`${dbPrefix}attribute\` a ON a.attribute_id = pa.attribute_id
+        JOIN \`${dbPrefix}attribute_group\` ag ON ag.attribute_group_id = a.attribute_group_id
+        LEFT JOIN \`${dbPrefix}attribute_description\` ad
+            ON ad.attribute_id = a.attribute_id AND ad.language_id = pa.language_id
+        LEFT JOIN \`${dbPrefix}attribute_group_description\` agd
+            ON agd.attribute_group_id = ag.attribute_group_id AND agd.language_id = pa.language_id
+        WHERE pa.product_id = ? AND pa.language_id = ?
+        ORDER BY ag.sort_order, agd.name, a.sort_order, ad.name`,
+        [id, languageId],
+    );
+
+    return rows.map((row) => ({
+        id: row.attribute_id,
+        name: decode(row.name ?? ""),
+        group: decode(row.group_name ?? ""),
+        text: decode(row.text),
+    }));
+}
+
 export interface Category {
     id: number;
     name: string;

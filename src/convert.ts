@@ -1,5 +1,5 @@
 import { decode } from "he";
-import type { FullProduct, OptionValue, ProductOption, Special } from "./opencart.ts";
+import type { Attribute, FullProduct, OptionValue, ProductOption, Special } from "./opencart.ts";
 
 export type WeightUnit = "KILOGRAMS" | "GRAMS" | "POUNDS" | "OUNCES";
 
@@ -193,6 +193,62 @@ export function toProductSetInput(
                 : [{ name: "Title", values: [{ name: "Default Title" }] }],
         variants,
     };
+}
+
+export interface ProductMetafield {
+    /** The OpenCart attribute it comes from. */
+    attributeId: number;
+    name: string;
+    group: string;
+    namespace: "custom";
+    key: string;
+    type: "single_line_text_field";
+    value: string;
+}
+
+// Shopify metafield keys: 2 to 64 letters, numbers, hyphens or underscores.
+// "No. of Cores" → "no_of_cores"; without usable characters, "attribute_<id>".
+export function toMetafieldKey(attribute: { id: number; name: string }): string {
+    const key = attribute.name
+        .normalize("NFKD")
+        .replace(/[̀-ͯ]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 64);
+    return key.length >= 2 ? key : `attribute_${attribute.id}`;
+}
+
+// OpenCart attributes → product metafields in the merchant's "custom" namespace,
+// as Shopify admin creates them. Values are single-line text, as typed in OpenCart.
+export function toMetafields(productId: number, attributes: Attribute[]): ProductMetafield[] {
+    const metafields: ProductMetafield[] = [];
+    for (const attribute of attributes) {
+        // A single-line field can't hold line breaks; the text itself stays the same.
+        const value = tidyText(attribute.text);
+        if (!value) {
+            console.log(`Product ${productId}: attribute "${attribute.name}" is empty, skipping it`);
+            continue;
+        }
+
+        const key = toMetafieldKey(attribute);
+        const other = metafields.find((m) => m.key === key);
+        if (other)
+            throw new Error(
+                `Product ${productId}: attributes "${other.name}" and "${attribute.name}" would both become metafield custom.${key}. Rename one in OpenCart.`,
+            );
+
+        metafields.push({
+            attributeId: attribute.id,
+            name: attribute.name,
+            group: attribute.group,
+            namespace: "custom",
+            key,
+            type: "single_line_text_field",
+            value,
+        });
+    }
+    return metafields;
 }
 
 // Shopify reformats HTML when saving it: it puts a newline between </p><p>, turns

@@ -6,6 +6,7 @@ import { requireEnv } from "./env.ts";
 import {
     connect,
     getProduct,
+    getProductAttributes,
     getProductImages,
     getPriceRules,
     getProductCategories,
@@ -14,7 +15,7 @@ import {
     getSeoUrlsEnabled,
     type FullProduct,
 } from "./opencart.ts";
-import { sameHtml, shopifyWeightUnit, toProductSetInput, type ProductSetInput } from "./convert.ts";
+import { sameHtml, shopifyWeightUnit, toMetafields, toProductSetInput, type ProductSetInput } from "./convert.ts";
 import { prepareCollections, type ProductCollection } from "./collections.ts";
 import { rewriteDescriptionImages } from "./description.ts";
 import { syncDiscounts } from "./discounts.ts";
@@ -226,6 +227,13 @@ async function migrateProduct(
 
     // Before comparing or sending, so the description has Shopify image URLs.
     input.descriptionHtml = await rewriteDescriptionImages(input.descriptionHtml, dryRun);
+
+    // Attributes (OpenCart's "Specification" tab) → product metafields.
+    const metafields = toMetafields(id, await getProductAttributes(connection, id));
+    if (dryRun && metafields.length > 0)
+        console.log(
+            `Metafields:\n${metafields.map((m) => `  ${m.namespace}.${m.key} ("${m.name}", group "${m.group}") = "${m.value}"`).join("\n")}`,
+        );
 
     // Each category becomes a collection; missing ones are created first.
     const collections = await prepareCollections(
