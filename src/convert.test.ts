@@ -4,14 +4,18 @@ import {
     buildHandle,
     cleanDescription,
     roundCents,
+    sameAddress,
     sameHtml,
     tidyText,
+    toAddressInput,
+    toCustomerInput,
+    toE164,
     toHandle,
     toMetafieldKey,
     toMetafields,
     toProductSetInput,
 } from "./convert.ts";
-import type { FullProduct, ProductOption } from "./opencart.ts";
+import type { Customer, CustomerAddress, FullProduct, ProductOption } from "./opencart.ts";
 
 // A simple enabled product; each test changes what it needs.
 function product(changes: Partial<FullProduct> = {}): FullProduct {
@@ -214,4 +218,126 @@ describe("toProductSetInput", () => {
         const cheap = [{ name: "Size", values: [value("S", { priceModifier: -200 })] }];
         assert.throws(() => toProductSetInput(product(), "loc", cheap, null, null), /negative price/);
     });
+});
+
+describe("toE164", () => {
+    const cases: [string, string, string | null][] = [
+        ["1234567890", "IN", "+911234567890"],
+        ["1234567890", "NL", null], // the same digits aren't a Dutch number
+        ["06 12345678", "NL", "+31612345678"], // national format with spaces
+        ["+44 20 7946 0958", "NL", "+442079460958"], // "+" wins over the country
+        ["1234567890", "", null], // no "+" and no country: can't tell
+        ["", "NL", null],
+        ["n/a", "NL", null],
+    ];
+    for (const [telephone, country, expected] of cases)
+        it(`"${telephone}" in ${country || "no country"}`, () => assert.equal(toE164(telephone, country), expected));
+});
+
+function address(changes: Partial<CustomerAddress> = {}): CustomerAddress {
+    return {
+        id: 1,
+        firstName: "Jan",
+        lastName: "Jansen",
+        company: "",
+        address1: "Main street 1",
+        address2: "",
+        city: "Eindhoven",
+        postcode: "5611AB",
+        countryCode: "NL",
+        zoneCode: "NB",
+        zoneName: "Noord-Brabant",
+        ...changes,
+    };
+}
+
+function customer(changes: Partial<Customer> = {}): Customer {
+    return {
+        id: 7,
+        firstName: "Jan",
+        lastName: "Jansen",
+        email: "Jan@Example.com ",
+        telephone: "06 12345678",
+        newsletter: false,
+        enabled: true,
+        group: null,
+        dateAdded: "2026-02-19",
+        addresses: [address()],
+        defaultAddressId: 1,
+        ...changes,
+    };
+}
+
+describe("toCustomerInput", () => {
+    it("converts a customer", () =>
+        assert.deepEqual(toCustomerInput(customer()), {
+            email: "jan@example.com",
+            firstName: "Jan",
+            lastName: "Jansen",
+            phone: "+31612345678",
+            note: "Migrated from OpenCart: customer #7, registered 2026-02-19.",
+            tags: [],
+        }));
+
+    it("reads the phone in the default address's country, not the first address's", () => {
+        const c = customer({
+            telephone: "1234567890",
+            addresses: [address({ id: 1 }), address({ id: 2, countryCode: "IN" })],
+            defaultAddressId: 2,
+        });
+        assert.equal(toCustomerInput(c).phone, "+911234567890");
+    });
+
+    it("leaves out a phone it can't read", () =>
+        assert.equal(toCustomerInput(customer({ addresses: [], defaultAddressId: null, telephone: "1234567890" })).phone, null));
+
+    it("tags a group other than the default", () =>
+        assert.deepEqual(toCustomerInput(customer({ group: "Wholesale" })).tags, ["Wholesale"]));
+});
+
+describe("toAddressInput", () => {
+    it("converts an address", () =>
+        assert.deepEqual(toAddressInput(address({ company: "  ACME  BV " })), {
+            firstName: "Jan",
+            lastName: "Jansen",
+            company: "ACME BV",
+            address1: "Main street 1",
+            address2: "",
+            city: "Eindhoven",
+            zip: "5611AB",
+            countryCode: "NL",
+            provinceCode: "NB",
+        }));
+
+    it("leaves out empty country and province codes", () => {
+        const input = toAddressInput(address({ countryCode: "", zoneCode: "" }));
+        assert.equal(input.countryCode, undefined);
+        assert.equal(input.provinceCode, undefined);
+    });
+});
+
+describe("sameAddress", () => {
+    const wanted = toAddressInput(address());
+    // The address as Shopify returns it after saving: null for empty fields,
+    // the postcode reformatted, the Dutch province dropped.
+    const saved = {
+        firstName: "Jan",
+        lastName: "Jansen",
+        company: null,
+        address1: "Main street 1",
+        address2: null,
+        city: "Eindhoven",
+        zip: "5611 AB",
+        countryCode: "NL",
+        provinceCode: null,
+    };
+
+    it("ignores what Shopify changes when saving", () => assert.ok(sameAddress(wanted, saved)));
+    it("sees a changed field", () => assert.ok(!sameAddress(wanted, { ...saved, city: "Tilburg" })));
+    it("sees a changed postcode", () => assert.ok(!sameAddress(wanted, { ...saved, zip: "5611 AC" })));
+    it("sees a changed country", () => assert.ok(!sameAddress(wanted, { ...saved, countryCode: "BE" })));
+    it("sees a different province when Shopify has one", () =>
+        assert.ok(!sameAddress({ ...wanted, provinceCode: "UP" }, { ...saved, provinceCode: "DL" })));
+    it("sees a province removed in OpenCart", () =>
+        assert.ok(!sameAddress({ ...wanted, provinceCode: undefined }, { ...saved, provinceCode: "UP" })));
 });

@@ -1,8 +1,8 @@
 # OpenCart to Shopify
 
-Migrates products from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
+Migrates products and customers from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts.
+For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts. Customers are migrated with their addresses, phone number and newsletter consent (see [Customers](#customers-npm-run-customers)).
 
 ## Requirements
 
@@ -11,10 +11,12 @@ For now it migrates one product at a time with its basic details, images, varian
 - A Shopify app with these scopes:
 
   ```
-  read_products,write_products,read_files,write_files,read_inventory,write_inventory,read_locations,read_publications,write_publications,read_online_store_navigation,write_online_store_navigation,read_discounts,write_discounts
+  read_products,write_products,read_files,write_files,read_inventory,write_inventory,read_locations,read_publications,write_publications,read_online_store_navigation,write_online_store_navigation,read_discounts,write_discounts,read_customers,write_customers
   ```
 
-  All of them are used: products, files, inventory, locations, publications (sales channels) and online store navigation (URL redirects; menus later). The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
+  All of them are used: products, files, inventory, locations, publications (sales channels), online store navigation (URL redirects and the main menu), discounts and customers. The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
+
+  Customers also need **protected customer data access**: without it, Shopify answers "This app is not approved to access the Customer object", even with the customer scopes. In the Partner Dashboard, open the app, go to **API access requests → Protected customer data access → Request access**, select **Protected customer data** and then the **Name, Email, Phone and Address** fields, each with a reason, and save. For an app installed only on development stores, that's all: no review or data protection details are needed. (The Dev Dashboard has no page for this.)
 
 ## Setup
 
@@ -72,6 +74,9 @@ npm run migrate -- --all         # create every product not migrated yet
 npm run migrate -- --all --update  # also update the ones already migrated
 npm run menu -- --dry-run        # show the main menu that would be built from OpenCart's
 npm run menu                     # replace Shopify's main menu with OpenCart's category menu
+npm run customers -- 1 --dry-run # show what would be sent for OpenCart customer 1
+npm run customers -- --all       # create every customer not migrated yet
+npm run customers -- --all --update  # also update the ones already migrated
 npm start                        # list OpenCart and Shopify products
 npm run typecheck                # type-check without running
 npm test                         # unit tests (no database or Shopify needed)
@@ -163,7 +168,21 @@ Categories in the menu that have no collection yet (because no migrated product 
 
 The menu is compared with Shopify's first: if it's the same, nothing is changed, so the command can be rerun. Otherwise the whole menu is replaced, including items added in Shopify, and the old top-level items are logged. Shopify's footer and other menus aren't touched.
 
-`migration.sqlite` records which products, categories, attributes, description images, redirects and discounts have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
+### Customers (`npm run customers`)
+
+`npm run customers -- <id>|--all [--update] [--dry-run]` works like `migrate`: `--all` goes through every customer, continues after a failure and prints a summary; `--dry-run` only prints.
+
+- **Name and email:** the email is lowercased (Shopify ignores case in emails). If Shopify already has a customer with the same email, that customer is updated and linked instead of creating a duplicate, and the run says "linked".
+- **Phone:** converted to E.164 (`+911234567890`), the format Shopify requires, with [libphonenumber-js](https://www.npmjs.com/package/libphonenumber-js). A number without `+` is read as a number of the default address's country, so the same digits can be valid in one country and not in another. An invalid number is left out with a warning. Shopify allows each phone number on one customer only, like an email.
+- **Addresses:** all of them, the OpenCart default staying the default. The country becomes its ISO code. OpenCart's zone code is sent as the province code: for countries without provinces in Shopify (e.g. the Netherlands) Shopify drops it, and a code Shopify doesn't accept (OpenCart's Delhi is `DE`, Shopify's `DL`) is left out with a warning, so the province can be set by hand. Shopify may reformat postcodes (`8225BZ` → `8225 BZ`).
+- **Newsletter:** a subscriber becomes "subscribed" to email marketing (single opt-in, dated at registration, as OpenCart doesn't record when the box was ticked). Others stay "not subscribed".
+- **Customer group:** a group other than OpenCart's default becomes a tag.
+- **Note:** `Migrated from OpenCart: customer #1, registered 2026-02-19.` Shopify's "customer since" date can't be set.
+- **Not migrated:** passwords (Shopify can't import password hashes; customers sign in with a one-time code sent by email, so migrated customers show "No account" until they first do), reward points, transactions, wishlists and custom fields. Disabled customers are skipped with a warning.
+
+Each customer and address is remembered in `migration.sqlite`, saved straight after it's created. With `--update`, OpenCart is the source of truth: the email, name, phone, note and tags (tags added in Shopify are removed), the addresses, the default address and the email marketing state are brought in line, and only the differences are printed and sent. Addresses added in Shopify are kept; migrated addresses removed in OpenCart are deleted, and one deleted in Shopify is added again. Unsubscribing in OpenCart unsubscribes in Shopify. A disabled customer is left as it is in Shopify.
+
+`migration.sqlite` records which products, categories, attributes, description images, redirects, discounts, customers and addresses have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
 
 ## Project structure
 
@@ -171,15 +190,16 @@ The menu is compared with Shopify's first: if it's the same, nothing is changed,
 src/
   migrate.ts   Migrate one product (npm run migrate)
   menu.ts      OpenCart category menu → Shopify main menu (npm run menu)
+  customers.ts Migrate customers with their addresses (npm run customers)
   index.ts     List products from both stores (npm start)
   env.ts       requireEnv() for reading environment variables
-  opencart.ts  Database connection and product queries
-  convert.ts   OpenCart product → Shopify productSet input, handle building
+  opencart.ts  Database connection, product and customer queries
+  convert.ts   OpenCart product/customer → Shopify input, handle building
   shopify.ts   Access token, graphql() helper and product creation
   collections.ts  OpenCart categories → Shopify collections
   attributes.ts   OpenCart attributes → Shopify metafield definitions
   discounts.ts OpenCart quantity discounts → Shopify automatic discounts
   description.ts  Images inside descriptions → Shopify Files
-  mapping.ts   SQLite mapping of migrated products, categories, attributes, files, redirects and discounts
+  mapping.ts   SQLite mapping of migrated products, categories, attributes, customers, addresses, files, redirects and discounts
   redirects.ts Old OpenCart URLs → Shopify URL redirects
 ```
