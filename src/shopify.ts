@@ -1236,6 +1236,15 @@ export async function findCustomerIdByEmail(email: string): Promise<string | nul
 }
 
 // "gid://shopify/Customer/123" → the customer's page in Shopify admin.
+// Finds the Shopify customer that has this phone number (E.164).
+export async function findCustomerIdByPhone(phone: string): Promise<string | null> {
+    const data = await graphql<{ customerByIdentifier: { id: string } | null }>(
+        `query ($phone: String!) { customerByIdentifier(identifier: { phoneNumber: $phone }) { id } }`,
+        { phone },
+    );
+    return data.customerByIdentifier?.id ?? null;
+}
+
 export function adminCustomerUrl(customerId: string): string {
     const store = requireEnv("SHOPIFY_SHOP").replace(/\.myshopify\.com$/, "");
     return `https://admin.shopify.com/store/${store}/customers/${customerId.split("/").pop()}`;
@@ -1324,17 +1333,23 @@ export async function getShopifyCustomer(id: string): Promise<ShopifyCustomer | 
     };
 }
 
+// What Shopify saved; the province code shows whether Shopify kept the one we sent.
+export interface SavedAddress {
+    id: string;
+    provinceCode: string | null;
+}
+
 export async function createCustomerAddress(
     customerId: string,
     address: AddressInput,
     setAsDefault: boolean,
-): Promise<string> {
+): Promise<SavedAddress> {
     const { customerAddressCreate } = await graphql<{
-        customerAddressCreate: { address: { id: string } | null } & UserErrorsResult;
+        customerAddressCreate: { address: SavedAddress | null } & UserErrorsResult;
     }>(
         `mutation ($customerId: ID!, $address: MailingAddressInput!, $setAsDefault: Boolean) {
             customerAddressCreate(customerId: $customerId, address: $address, setAsDefault: $setAsDefault) {
-                address { id }
+                address { id provinceCode }
                 userErrors { field message }
             }
         }`,
@@ -1342,19 +1357,28 @@ export async function createCustomerAddress(
     );
     throwUserErrors("Shopify rejected the address", customerAddressCreate.userErrors);
     if (!customerAddressCreate.address) throw new Error("Shopify returned no address.");
-    return customerAddressCreate.address.id;
+    return customerAddressCreate.address;
 }
 
-export async function updateCustomerAddress(customerId: string, addressId: string, address: AddressInput): Promise<void> {
-    const { customerAddressUpdate } = await graphql<{ customerAddressUpdate: UserErrorsResult }>(
+export async function updateCustomerAddress(
+    customerId: string,
+    addressId: string,
+    address: AddressInput,
+): Promise<SavedAddress> {
+    const { customerAddressUpdate } = await graphql<{
+        customerAddressUpdate: { address: SavedAddress | null } & UserErrorsResult;
+    }>(
         `mutation ($customerId: ID!, $addressId: ID!, $address: MailingAddressInput!) {
             customerAddressUpdate(customerId: $customerId, addressId: $addressId, address: $address) {
+                address { id provinceCode }
                 userErrors { field message }
             }
         }`,
         { customerId, addressId, address },
     );
     throwUserErrors("Shopify rejected the address update", customerAddressUpdate.userErrors);
+    if (!customerAddressUpdate.address) throw new Error("Shopify returned no address.");
+    return customerAddressUpdate.address;
 }
 
 export async function deleteCustomerAddress(customerId: string, addressId: string): Promise<void> {

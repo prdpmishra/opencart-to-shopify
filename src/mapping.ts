@@ -42,6 +42,12 @@ function getDb(): DatabaseSync {
             target TEXT NOT NULL,
             migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS unaccepted_province (
+            country_code TEXT NOT NULL,
+            province_code TEXT NOT NULL,
+            rejected INTEGER NOT NULL, -- 1: Shopify refused it, 0: Shopify dropped it
+            PRIMARY KEY (country_code, province_code)
+        );
         CREATE TABLE IF NOT EXISTS discount_mapping (
             product_id INTEGER NOT NULL,
             quantity INTEGER NOT NULL,
@@ -164,4 +170,24 @@ export function deleteMappingByShopifyId(entityType: EntityType, shopifyId: stri
     getDb()
         .prepare("DELETE FROM mapping WHERE entity_type = ? AND shopify_id = ?")
         .run(entityType, shopifyId);
+}
+
+// OpenCart zone codes that Shopify doesn't keep as a province: rejected ones
+// (OpenCart's Delhi is "DE", Shopify's "DL") and silently dropped ones (countries
+// without provinces in Shopify, e.g. the Netherlands). They aren't sent again,
+// so a province set by hand in Shopify is kept.
+export function findUnacceptedProvince(
+    countryCode: string,
+    provinceCode: string,
+): { rejected: boolean } | undefined {
+    const row = getDb()
+        .prepare("SELECT rejected FROM unaccepted_province WHERE country_code = ? AND province_code = ?")
+        .get(countryCode, provinceCode) as { rejected: number } | undefined;
+    return row && { rejected: row.rejected === 1 };
+}
+
+export function saveUnacceptedProvince(countryCode: string, provinceCode: string, rejected: boolean): void {
+    getDb()
+        .prepare("INSERT OR IGNORE INTO unaccepted_province (country_code, province_code, rejected) VALUES (?, ?, ?)")
+        .run(countryCode, provinceCode, rejected ? 1 : 0);
 }

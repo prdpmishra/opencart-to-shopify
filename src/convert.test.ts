@@ -309,15 +309,16 @@ describe("toAddressInput", () => {
             provinceCode: "NB",
         }));
 
-    it("leaves out empty country and province codes", () => {
+    it("leaves out an empty country and sends an empty province as null, which clears it", () => {
         const input = toAddressInput(address({ countryCode: "", zoneCode: "" }));
         assert.equal(input.countryCode, undefined);
-        assert.equal(input.provinceCode, undefined);
+        assert.equal(input.provinceCode, null);
     });
 });
 
 describe("sameAddress", () => {
-    const wanted = toAddressInput(address());
+    // A province Shopify doesn't keep (here the Dutch "NB") is left out.
+    const wanted = { ...toAddressInput(address()), provinceCode: undefined };
     // The address as Shopify returns it after saving: null for empty fields,
     // the postcode reformatted, the Dutch province dropped.
     const saved = {
@@ -339,5 +340,9 @@ describe("sameAddress", () => {
     it("sees a different province when Shopify has one", () =>
         assert.ok(!sameAddress({ ...wanted, provinceCode: "UP" }, { ...saved, provinceCode: "DL" })));
     it("sees a province removed in OpenCart", () =>
-        assert.ok(!sameAddress({ ...wanted, provinceCode: undefined }, { ...saved, provinceCode: "UP" })));
+        assert.ok(!sameAddress({ ...wanted, provinceCode: null }, { ...saved, provinceCode: "UP" })));
+    it("sees a province added in OpenCart", () =>
+        assert.ok(!sameAddress({ ...wanted, provinceCode: "UP" }, saved)));
+    it("keeps a province set by hand when OpenCart's isn't accepted", () =>
+        assert.ok(sameAddress(wanted, { ...saved, provinceCode: "DL" })));
 });

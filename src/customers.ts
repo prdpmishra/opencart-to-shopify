@@ -11,18 +11,27 @@ import {
     type AddressInput,
     type CustomerInput,
 } from "./convert.ts";
-import { deleteMappingByShopifyId, findMapping, isMappedShopifyId, saveMapping } from "./mapping.ts";
+import {
+    deleteMappingByShopifyId,
+    findMapping,
+    findUnacceptedProvince,
+    isMappedShopifyId,
+    saveMapping,
+    saveUnacceptedProvince,
+} from "./mapping.ts";
 import { connect, getCustomer, getCustomerIds, type Customer } from "./opencart.ts";
 import {
     adminCustomerUrl,
     createCustomerAddress,
     deleteCustomerAddress,
     findCustomerIdByEmail,
+    findCustomerIdByPhone,
     getShopifyCustomer,
     setCustomer,
     setDefaultCustomerAddress,
     setEmailMarketing,
     updateCustomerAddress,
+    type SavedAddress,
 } from "./shopify.ts";
 
 const USAGE =
@@ -46,6 +55,8 @@ interface WantedAddress {
     input: AddressInput;
     isDefault: boolean;
     zoneName: string; // for warnings
+    // OpenCart's zone code when Shopify refused it before, so it isn't sent.
+    rejectedProvince: string | null;
 }
 
 async function main() {
@@ -155,12 +166,21 @@ async function migrateCustomer(
     if (!input.phone && customer.telephone.trim())
         console.warn(`Warning: "${customer.telephone}" isn't a valid phone number, leaving it out.`);
 
-    const addresses: WantedAddress[] = customer.addresses.map((address) => ({
-        opencartId: address.id,
-        input: toAddressInput(address),
-        isDefault: address.id === customer.defaultAddressId,
-        zoneName: address.zoneName,
-    }));
+    const addresses: WantedAddress[] = customer.addresses.map((address) => {
+        const input = toAddressInput(address);
+        // A code Shopify didn't keep before isn't sent again (see withProvinceFallback).
+        const unaccepted = input.provinceCode
+            ? findUnacceptedProvince(address.countryCode, input.provinceCode)
+            : undefined;
+        if (unaccepted) input.provinceCode = undefined;
+        return {
+            opencartId: address.id,
+            input,
+            isDefault: address.id === customer.defaultAddressId,
+            zoneName: address.zoneName,
+            rejectedProvince: unaccepted?.rejected ? address.zoneCode : null,
+        };
+    });
 
     if (existing) return updateCustomer(customer, existing.shopify_id, input, addresses, dryRun);
     return createCustomer(customer, input, addresses, dryRun);
@@ -174,6 +194,13 @@ async function createCustomer(
 ): Promise<Result> {
     // customerSet with an email identifier updates a customer that already has this email.
     const existingId = await findCustomerIdByEmail(input.email);
+    // ...unless that one was migrated from another OpenCart customer with the same email.
+    if (existingId && isMappedShopifyId("customer", existingId))
+        throw new Error(
+            `Shopify customer ${adminCustomerUrl(existingId)} with the email ${input.email} was already migrated ` +
+                "from another OpenCart customer. Give one of them a different email in OpenCart.",
+        );
+    input.phone = await phoneFor(input, existingId);
 
     if (dryRun) {
         console.log(
@@ -200,7 +227,7 @@ async function createCustomer(
     console.log(`${existingId ? "Linked to the existing" : "Created"} Shopify customer: ${adminCustomerUrl(customerId)}`);
 
     for (const wanted of addresses) {
-        const addressId = await withProvinceFallback(wanted, (address) =>
+        const { id: addressId } = await withProvinceFallback(wanted, true, (address) =>
             createCustomerAddress(customerId, address, wanted.isDefault),
         );
         saveMapping("address", wanted.opencartId, addressId);
@@ -233,6 +260,7 @@ async function updateCustomer(
                 "Remove its row from the mapping table to create it again.",
         );
     console.log(`Shopify customer: ${adminCustomerUrl(customerId)}`);
+    input.phone = await phoneFor(input, customerId);
 
     const changes: string[] = [];
     const quote = (value: string | null) => (value ? `"${value}"` : "(none)");
@@ -301,9 +329,9 @@ async function updateCustomer(
     if (customerChanged) await setCustomer(input, customerId);
 
     for (const { addressId, wanted } of toUpdate)
-        await withProvinceFallback(wanted, (address) => updateCustomerAddress(customerId, addressId, address));
+        await withProvinceFallback(wanted, false, (address) => updateCustomerAddress(customerId, addressId, address));
     for (const wanted of toCreate) {
-        const addressId = await withProvinceFallback(wanted, (address) =>
+        const { id: addressId } = await withProvinceFallback(wanted, true, (address) =>
             createCustomerAddress(customerId, address, wanted.isDefault),
         );
         const old = findMapping("address", wanted.opencartId);
@@ -316,37 +344,64 @@ async function updateCustomer(
     }
     if (fixDefault) await setDefaultCustomerAddress(customerId, fixDefault);
 
-    if (marketingChanged)
-        await setEmailMarketing(
-            customerId,
-            customer.newsletter,
-            customer.newsletter ? `${customer.dateAdded}T00:00:00Z` : undefined,
-        );
+    // Dated now: Shopify silently ignores a consent change dated before the
+    // previous one (e.g. re-subscribing at the registration date after an unsubscribe).
+    if (marketingChanged) await setEmailMarketing(customerId, customer.newsletter);
 
     console.log("Updated.");
     return "updated";
 }
 
-// Shopify only accepts its own province codes. OpenCart's zone codes are mostly
-// the same (ISO 3166-2) but not always: Delhi is "DE" in OpenCart and "DL" in
-// Shopify. Rather than lose the whole address, it is saved without a province.
-// (A code for a country without provinces in Shopify, e.g. a Dutch one, is
-// dropped by Shopify itself without an error.)
-async function withProvinceFallback<T>(
+// Saves an address, remembering province codes Shopify doesn't keep, so they
+// aren't sent again and a province set by hand in Shopify stays:
+// - Shopify only accepts its own province codes. OpenCart's zone codes are mostly
+//   the same (ISO 3166-2) but not always: Delhi is "DE" in OpenCart and "DL" in
+//   Shopify. Rather than lose the whole address, it is saved without a province.
+// - For countries without provinces in Shopify (e.g. the Netherlands), Shopify
+//   drops the code without an error.
+async function withProvinceFallback(
     wanted: WantedAddress,
-    save: (address: AddressInput) => Promise<T>,
-): Promise<T> {
+    isNew: boolean,
+    save: (address: AddressInput) => Promise<SavedAddress>,
+): Promise<SavedAddress> {
+    const { countryCode, provinceCode } = wanted.input;
     try {
-        return await save(wanted.input);
+        const saved = await save(wanted.input);
+        if (countryCode && provinceCode && saved.provinceCode === null)
+            saveUnacceptedProvince(countryCode, provinceCode, false);
+        // Known before, so not sent: say so for a new address (not on every update).
+        else if (wanted.rejectedProvince && isNew) warnRejectedProvince(wanted, wanted.rejectedProvince);
+        return saved;
     } catch (error) {
-        if (!wanted.input.provinceCode || !String(error).includes("Province is invalid")) throw error;
-        console.warn(
-            `Warning: Shopify doesn't accept OpenCart's province code "${wanted.input.provinceCode}" ` +
-                `(${wanted.zoneName}, ${wanted.input.countryCode}). The address is saved without a province; ` +
-                "set it by hand in Shopify.",
-        );
-        return save({ ...wanted.input, provinceCode: undefined });
+        if (!countryCode || !provinceCode || !String(error).includes("Province is invalid")) throw error;
+        saveUnacceptedProvince(countryCode, provinceCode, true);
+        warnRejectedProvince(wanted, provinceCode);
+        // null, not left out: on an update, leaving it out keeps the old province.
+        return save({ ...wanted.input, provinceCode: null });
     }
+}
+
+function warnRejectedProvince(wanted: WantedAddress, provinceCode: string): void {
+    console.warn(
+        `Warning: Shopify doesn't accept OpenCart's province code "${provinceCode}" ` +
+            `(${wanted.zoneName}, ${wanted.input.countryCode}). The address is saved without a province; ` +
+            "set it by hand in Shopify.",
+    );
+}
+
+// The phone to give the customer. Shopify allows a phone number on one customer
+// only ("Phone has already been taken"), but family members often share one in
+// OpenCart. Rather than not migrating the customer at all, it gets no phone.
+// customerId is the Shopify customer being saved, or null for a new one.
+async function phoneFor(input: CustomerInput, customerId: string | null): Promise<string | null> {
+    if (!input.phone) return null;
+    const owner = await findCustomerIdByPhone(input.phone);
+    if (!owner || owner === customerId) return input.phone;
+    console.warn(
+        `Warning: phone ${input.phone} already belongs to another Shopify customer (${adminCustomerUrl(owner)}). ` +
+            "This customer gets no phone.",
+    );
+    return null;
 }
 
 // Works for both our AddressInput and Shopify's addresses (which use null for empty fields).

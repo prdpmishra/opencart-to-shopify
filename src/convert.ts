@@ -355,7 +355,8 @@ export interface AddressInput {
     city: string;
     zip: string;
     countryCode?: string | undefined; // left out when OpenCart has none
-    provinceCode?: string | undefined;
+    // null: no province (clears it on an update); left out: keep Shopify's.
+    provinceCode?: string | null | undefined;
 }
 
 // Turns a phone number as typed in OpenCart into E.164 ("+31612345678"), which
@@ -389,16 +390,15 @@ export function toAddressInput(address: CustomerAddress): AddressInput {
         city: tidyText(address.city),
         zip: tidyText(address.postcode),
         countryCode: address.countryCode || undefined,
-        provinceCode: address.zoneCode || undefined,
+        provinceCode: address.zoneCode || null,
     };
 }
 
 // Whether an address in Shopify already matches the wanted one, allowing for
 // what Shopify changes when it saves an address:
 // - empty fields come back as null;
-// - postcodes are reformatted to the country's style ("8225BZ" → "8225 BZ");
-// - a province code is dropped for countries without provinces in Shopify
-//   (e.g. OpenCart's Dutch zones), so a missing one in Shopify isn't a difference.
+// - postcodes are reformatted to the country's style ("8225BZ" → "8225 BZ").
+// A province left out of the wanted address (one Shopify doesn't keep) isn't compared.
 export function sameAddress(
     wanted: AddressInput,
     current: { [K in keyof AddressInput]-?: string | null },
@@ -410,6 +410,6 @@ export function sameAddress(
             (field) => text(wanted[field]) === text(current[field]),
         ) &&
         zip(wanted.zip) === zip(current.zip) &&
-        (current.provinceCode === null || text(wanted.provinceCode) === current.provinceCode)
+        (wanted.provinceCode === undefined || text(wanted.provinceCode) === text(current.provinceCode))
     );
 }
