@@ -827,6 +827,20 @@ export async function publishToOnlineStore(id: string): Promise<void> {
     throwUserErrors("Could not publish to the Online Store", publishablePublish.userErrors);
 }
 
+// Hides a product or collection from the Online Store sales channel.
+export async function unpublishFromOnlineStore(id: string): Promise<void> {
+    const publicationId = await getOnlineStorePublicationId();
+    const { publishableUnpublish } = await graphql<{ publishableUnpublish: UserErrorsResult }>(
+        `mutation Unpublish($id: ID!, $input: [PublicationInput!]!) {
+            publishableUnpublish(id: $id, input: $input) {
+                userErrors { field message }
+            }
+        }`,
+        { id, input: [{ publicationId }] },
+    );
+    throwUserErrors("Could not unpublish from the Online Store", publishableUnpublish.userErrors);
+}
+
 export interface MetafieldDefinition {
     id: string;
     namespace: string;
@@ -1033,6 +1047,16 @@ export async function setMenuItems(menu: ShopifyMenu, items: MenuItem[]): Promis
         items,
     });
     throwUserErrors("Shopify rejected the menu", menuUpdate.userErrors);
+}
+
+// The shop's name, Shopify's default vendor (looked up once).
+let shopName: string | undefined;
+export async function getShopName(): Promise<string> {
+    if (!shopName) {
+        const { shop } = await graphql<{ shop: { name: string } }>("{ shop { name } }");
+        shopName = shop.name;
+    }
+    return shopName;
 }
 
 // The shop's currency, e.g. "GBP" (looked up once).

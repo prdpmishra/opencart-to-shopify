@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { requireEnv } from "./env.ts";
 import { findFileMapping, saveFileMapping } from "./mapping.ts";
 import { createImageFile, uploadImage } from "./shopify.ts";
@@ -14,11 +14,18 @@ export function toImagePath(src: string, imageUrl: string): string | null {
     const prefix = imageUrl.endsWith("/") ? imageUrl : `${imageUrl}/`;
     if (!URL.canParse(prefix))
         throw new Error(`OPENCART_IMAGE_URL must be a full URL, e.g. http://localhost/opencart/image/ (got "${imageUrl}")`);
-    const rootPrefix = new URL(prefix).pathname; // e.g. "/opencart/image/"
+    const base = new URL(prefix);
+    const rootPrefix = base.pathname; // e.g. "/opencart/image/"
 
     let path: string;
-    if (src.startsWith(prefix)) path = src.slice(prefix.length);
-    else if (src.startsWith(rootPrefix)) path = src.slice(rootPrefix.length);
+    if (URL.canParse(src)) {
+        // A full URL: OpenCart's image folder on the same host, over http or https
+        // (OpenCart's editor writes whichever the admin was using). A query such
+        // as "?v=2" isn't part of the file name.
+        const url = new URL(src);
+        if (url.host !== base.host || !url.pathname.startsWith(rootPrefix)) return null;
+        path = url.pathname.slice(rootPrefix.length);
+    } else if (src.startsWith(rootPrefix)) path = src.slice(rootPrefix.length);
     else if (src.startsWith("image/")) path = src.slice("image/".length);
     else if (src.startsWith("catalog/")) path = src;
     else return null;
@@ -43,7 +50,15 @@ export async function toShopifyFileUrl(
     const known = findFileMapping(path);
     if (known) return known.shopify_url;
 
-    const fullPath = join(requireEnv("OPENCART_IMAGE_DIR"), path);
+    // "../" in the path must not reach files outside OpenCart's image folder,
+    // which would then be uploaded to Shopify.
+    const imageDir = resolve(requireEnv("OPENCART_IMAGE_DIR"));
+    const fullPath = resolve(imageDir, path);
+    const inside = relative(imageDir, fullPath);
+    if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
+        console.warn(`Warning: ${what} "${path}" is outside OpenCart's image folder, skipping it.`);
+        return null;
+    }
     if (!existsSync(fullPath)) {
         console.warn(`Warning: ${what} not found, skipping: ${fullPath}`);
         return null;

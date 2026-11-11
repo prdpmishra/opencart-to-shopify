@@ -6,6 +6,7 @@ import {
     createCollection,
     getCollection,
     publishToOnlineStore,
+    unpublishFromOnlineStore,
     updateCollection,
     type CollectionInput,
 } from "./shopify.ts";
@@ -72,7 +73,8 @@ export async function prepareCollections(
 }
 
 // Updates the title and description from OpenCart, and publishes the collection
-// of an enabled category if it isn't published yet. Handle and image are kept.
+// of an enabled category if it isn't published yet (or unpublishes the one of a
+// disabled category). Handle and image are kept.
 // Returns the collection's handle.
 async function syncCollection(
     category: Category,
@@ -96,6 +98,9 @@ async function syncCollection(
         );
     const publish = category.enabled && !current.onlineStore;
     if (publish) changes.push("Online Store: not published → published");
+    // A category disabled in OpenCart after it was migrated is hidden again.
+    const unpublish = !category.enabled && current.onlineStore;
+    if (unpublish) changes.push("Online Store: published → not published (category disabled in OpenCart)");
     if (changes.length === 0) return current.handle;
 
     if (dryRun) {
@@ -106,6 +111,7 @@ async function syncCollection(
     if (current.title !== title || !sameHtml(current.descriptionHtml, descriptionHtml))
         await updateCollection(collectionId, { title, descriptionHtml });
     if (publish) await publishToOnlineStore(collectionId);
+    if (unpublish) await unpublishFromOnlineStore(collectionId);
     console.log(`Updated collection "${title}": ${changes.join(", ")}`);
     return current.handle;
 }

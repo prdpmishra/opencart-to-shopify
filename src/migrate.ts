@@ -32,6 +32,7 @@ import { findMapping, isMappedShopifyId, saveMapping } from "./mapping.ts";
 import {
     adminProductUrl,
     deleteProductMetafields,
+    getShopName,
     getShopTaxesIncluded,
     getShopifyProduct,
     publishToOnlineStore,
@@ -371,6 +372,11 @@ function sameWeight(
     return current?.unit === wanted.unit && Math.abs(current.value - wanted.value) < 1e-6;
 }
 
+// A value in quotes for the change log; long ones are cut short.
+function quoteShort(value: string): string {
+    return value.length <= 60 ? `"${value}"` : `"${value.slice(0, 50)}…" (${value.length} characters)`;
+}
+
 // Identifies a variant by its option values, e.g. "Color=Red|Size=Small".
 // Sorted, so the order of the options doesn't matter.
 function variantKey(options: { name: string; value: string }[]): string {
@@ -411,8 +417,10 @@ async function updateProduct(
         changes.push(`SEO title: "${current.seo.title ?? ""}" → "${input.seo.title}"`);
     if ((current.seo.description ?? "") !== input.seo.description)
         changes.push(`SEO description: changed`);
-    if (input.vendor !== undefined && current.vendor !== input.vendor)
-        changes.push(`vendor: "${current.vendor}" → "${input.vendor}"`);
+    // Without a manufacturer, Shopify uses the shop's name as the vendor, as when
+    // creating; so a manufacturer removed in OpenCart doesn't leave the old brand.
+    input.vendor ??= await getShopName();
+    if (current.vendor !== input.vendor) changes.push(`vendor: "${current.vendor}" → "${input.vendor}"`);
     if ([...current.tags].sort().join(",") !== [...input.tags].sort().join(","))
         changes.push(`tags: [${current.tags.join(", ")}] → [${input.tags.join(", ")}]`);
     let productChanged = changes.length > 0;
@@ -513,8 +521,8 @@ async function updateProduct(
     for (const metafield of metafields) {
         const currentValue = current.metafields.find((m) => m.key === metafield.key)?.value;
         if (currentValue === metafield.value) continue;
-        const from = currentValue === undefined ? "none" : `"${currentValue}"`;
-        changes.push(`metafield custom.${metafield.key}: ${from} → "${metafield.value}"`);
+        const from = currentValue === undefined ? "none" : quoteShort(currentValue);
+        changes.push(`metafield custom.${metafield.key}: ${from} → ${quoteShort(metafield.value)}`);
         metafieldsToSet.push(metafield);
     }
     const metafieldsToDelete = current.metafields.filter(
@@ -523,7 +531,7 @@ async function updateProduct(
             m.definitionId !== null &&
             isMappedShopifyId("attribute", m.definitionId),
     );
-    for (const m of metafieldsToDelete) changes.push(`metafield custom.${m.key}: "${m.value}" → deleted`);
+    for (const m of metafieldsToDelete) changes.push(`metafield custom.${m.key}: ${quoteShort(m.value)} → deleted`);
 
     if (changes.length === 0) {
         console.log(`Product ${id} is already up to date in Shopify (${shopifyId}).`);

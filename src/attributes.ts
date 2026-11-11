@@ -72,5 +72,16 @@ export async function prepareMetafieldDefinitions(
         result.push(metafield);
     }
 
+    // Checked on the final keys: a mapped attribute keeps its first key even when
+    // it's renamed, so two names can give the same key without a clash, or vice versa.
+    for (const [i, metafield] of result.entries()) {
+        const other = result.slice(0, i).find((m) => m.key === metafield.key);
+        if (other)
+            throw new Error(
+                `Attributes "${other.name}" and "${metafield.name}" would both become metafield ` +
+                    `${metafield.namespace}.${metafield.key}. Rename one in OpenCart.`,
+            );
+    }
+
     return result;
 }

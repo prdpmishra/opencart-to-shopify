@@ -233,19 +233,12 @@ export function toMetafields(productId: number, attributes: Attribute[]): Produc
             continue;
         }
 
-        const key = toMetafieldKey(attribute);
-        const other = metafields.find((m) => m.key === key);
-        if (other)
-            throw new Error(
-                `Product ${productId}: attributes "${other.name}" and "${attribute.name}" would both become metafield custom.${key}. Rename one in OpenCart.`,
-            );
-
         metafields.push({
             attributeId: attribute.id,
             name: attribute.name,
             group: attribute.group,
             namespace: "custom",
-            key,
+            key: toMetafieldKey(attribute),
             type: "single_line_text_field",
             value,
         });
