@@ -5,16 +5,22 @@
 import type { Connection } from "mysql2/promise";
 import { parseArgs } from "node:util";
 import { toAddressInput, toCustomerInput, type AddressInput } from "./convert.ts";
-import { findMapping } from "./mapping.ts";
+import { findMapping, saveMapping } from "./mapping.ts";
 import { connect, getCustomer, getCustomerIds } from "./opencart.ts";
-import { adminCustomerUrl, findCustomerIdByEmail } from "./shopify.ts";
+import {
+    adminCustomerUrl,
+    createCustomerAddress,
+    findCustomerIdByEmail,
+    setCustomer,
+    subscribeToEmailMarketing,
+} from "./shopify.ts";
 
 const USAGE =
     "Usage: npm run customers -- <opencart-customer-id> [--dry-run]\n" +
     "       npm run customers -- --all [--dry-run]";
 
 // What happened to one customer.
-type Result = "skipped" | "dry run";
+type Result = "created" | "linked" | "skipped" | "dry run";
 
 async function main() {
     let args;
@@ -39,11 +45,6 @@ async function main() {
     const validId = args.positionals.length === 1 && Number.isInteger(id) && id >= 1;
     if (all ? args.positionals.length > 0 : !validId) {
         console.error(USAGE);
-        process.exitCode = 1;
-        return;
-    }
-    if (!dryRun) {
-        console.error("Only --dry-run is supported so far.");
         process.exitCode = 1;
         return;
     }
@@ -135,7 +136,25 @@ async function migrateCustomer(connection: Connection, id: number, dryRun: boole
         return "dry run";
     }
 
-    throw new Error("Not implemented yet.");
+    // The mapping is saved straight after each step, so a failure halfway
+    // (e.g. a rejected address) doesn't lose track of what was created.
+    const customerId = await setCustomer(input);
+    saveMapping("customer", id, customerId);
+    console.log(`${existingId ? "Linked to the existing" : "Created"} Shopify customer: ${adminCustomerUrl(customerId)}`);
+
+    for (const [i, { input: address, isDefault }] of addresses.entries()) {
+        const addressId = await createCustomerAddress(customerId, address, isDefault);
+        saveMapping("address", customer.addresses[i]!.id, addressId);
+        console.log(`Address added${isDefault ? " (default)" : ""}: ${describeAddress(address)}`);
+    }
+
+    // OpenCart doesn't record when the box was ticked; the registration date is the closest.
+    if (customer.newsletter) {
+        await subscribeToEmailMarketing(customerId, `${customer.dateAdded}T00:00:00Z`);
+        console.log("Subscribed to email marketing.");
+    }
+
+    return existingId ? "linked" : "created";
 }
 
 function describeAddress(a: AddressInput): string {

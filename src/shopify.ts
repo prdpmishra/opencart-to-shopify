@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { requireEnv } from "./env.ts";
-import type { ProductSetInput } from "./convert.ts";
+import type { AddressInput, CustomerInput, ProductSetInput } from "./convert.ts";
 
 interface TokenResponse {
     access_token: string;
@@ -1239,4 +1239,66 @@ export async function findCustomerIdByEmail(email: string): Promise<string | nul
 export function adminCustomerUrl(customerId: string): string {
     const store = requireEnv("SHOPIFY_SHOP").replace(/\.myshopify\.com$/, "");
     return `https://admin.shopify.com/store/${store}/customers/${customerId.split("/").pop()}`;
+}
+
+// Creates a customer, or updates the one that already has this email.
+export async function setCustomer(input: CustomerInput): Promise<string> {
+    const { customerSet } = await graphql<{
+        customerSet: { customer: { id: string } | null } & UserErrorsResult;
+    }>(
+        `mutation ($input: CustomerSetInput!, $email: String!) {
+            customerSet(identifier: { email: $email }, input: $input) {
+                customer { id }
+                userErrors { field message }
+            }
+        }`,
+        { input, email: input.email },
+    );
+    throwUserErrors("Shopify rejected the customer", customerSet.userErrors);
+    if (!customerSet.customer) throw new Error("Shopify returned no customer.");
+    return customerSet.customer.id;
+}
+
+export async function createCustomerAddress(
+    customerId: string,
+    address: AddressInput,
+    setAsDefault: boolean,
+): Promise<string> {
+    const { customerAddressCreate } = await graphql<{
+        customerAddressCreate: { address: { id: string } | null } & UserErrorsResult;
+    }>(
+        `mutation ($customerId: ID!, $address: MailingAddressInput!, $setAsDefault: Boolean) {
+            customerAddressCreate(customerId: $customerId, address: $address, setAsDefault: $setAsDefault) {
+                address { id }
+                userErrors { field message }
+            }
+        }`,
+        { customerId, address, setAsDefault },
+    );
+    throwUserErrors("Shopify rejected the address", customerAddressCreate.userErrors);
+    if (!customerAddressCreate.address) throw new Error("Shopify returned no address.");
+    return customerAddressCreate.address.id;
+}
+
+// Records that the customer agreed to marketing emails (OpenCart's newsletter box).
+// "Single opt-in": they ticked a box, without confirming by email.
+export async function subscribeToEmailMarketing(customerId: string, since: string): Promise<void> {
+    const { customerEmailMarketingConsentUpdate } = await graphql<{
+        customerEmailMarketingConsentUpdate: UserErrorsResult;
+    }>(
+        `mutation ($input: CustomerEmailMarketingConsentUpdateInput!) {
+            customerEmailMarketingConsentUpdate(input: $input) { userErrors { field message } }
+        }`,
+        {
+            input: {
+                customerId,
+                emailMarketingConsent: {
+                    marketingState: "SUBSCRIBED",
+                    marketingOptInLevel: "SINGLE_OPT_IN",
+                    consentUpdatedAt: since,
+                },
+            },
+        },
+    );
+    throwUserErrors("Shopify rejected the marketing consent", customerEmailMarketingConsentUpdate.userErrors);
 }

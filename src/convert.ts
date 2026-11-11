@@ -354,8 +354,8 @@ export interface AddressInput {
     address2: string;
     city: string;
     zip: string;
-    countryCode: string;
-    provinceCode: string;
+    countryCode?: string | undefined; // left out when OpenCart has none
+    provinceCode?: string | undefined;
 }
 
 // Turns a phone number as typed in OpenCart into E.164 ("+31612345678"), which
@@ -388,7 +388,7 @@ export function toAddressInput(address: CustomerAddress): AddressInput {
         address2: tidyText(address.address2),
         city: tidyText(address.city),
         zip: tidyText(address.postcode),
-        countryCode: address.countryCode,
-        provinceCode: address.zoneCode,
+        countryCode: address.countryCode || undefined,
+        provinceCode: address.zoneCode || undefined,
     };
 }
