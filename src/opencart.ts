@@ -1,5 +1,6 @@
 import mysql, { type RowDataPacket, type Connection } from "mysql2/promise";
 import { decode } from "he";
+import { zonedTimeToUtc } from "./convert.ts";
 import { requireEnv } from "./env.ts";
 
 interface ProductRow extends RowDataPacket {
@@ -765,4 +766,184 @@ export async function getCustomerIds(connection: Connection): Promise<number[]> 
         `SELECT customer_id FROM \`${dbPrefix}customer\` ORDER BY customer_id`,
     );
     return rows.map((row) => row.customer_id as number);
+}
+
+// The store's default currency, e.g. "USD". OpenCart stores order amounts in it.
+export async function getStoreCurrency(connection: Connection): Promise<string> {
+    const { dbPrefix } = getSettings();
+    const [rows] = await connection.execute<RowDataPacket[]>(
+        `SELECT value FROM \`${dbPrefix}setting\` WHERE store_id = 0 AND \`key\` = 'config_currency'`,
+    );
+    if (!rows[0]) throw new Error("OpenCart has no default currency (config_currency).");
+    return rows[0].value as string;
+}
+
+export type OrderAddress = Omit<CustomerAddress, "id">;
+
+export interface OrderLine {
+    productId: number;
+    name: string;
+    model: string;
+    quantity: number;
+    /** Unit price, excluding tax. */
+    price: number;
+    /** The line's total, excluding tax. Normally price × quantity. */
+    total: number;
+    /** Tax per unit. */
+    tax: number;
+    /** The options the customer chose, e.g. { name: "Size", value: "Small", type: "select" }. */
+    options: { name: string; value: string; type: string }[];
+}
+
+export interface Order {
+    id: number;
+    /** 0 for a guest order. */
+    customerId: number;
+    email: string;
+    telephone: string;
+    /** 0 for a "missing order": a checkout that was never confirmed. */
+    statusId: number;
+    statusName: string;
+    /** What the customer paid in, e.g. "EUR", and its rate to the store's currency. */
+    currencyCode: string;
+    currencyValue: number;
+    /** All amounts are in the store's default currency. */
+    total: number;
+    comment: string;
+    /** Plain text, e.g. "iDEAL" (OpenCart may store HTML with a logo). */
+    paymentMethod: string;
+    shippingCode: string;
+    payment: OrderAddress;
+    /** null when nothing in the order needed shipping. */
+    shipping: OrderAddress | null;
+    /** As OpenCart shows it, e.g. "2026-06-04 22:53". */
+    dateAdded: string;
+    /** The same moment, as a UTC ISO string for Shopify. */
+    processedAt: string;
+    /** When the order last changed (e.g. its status), as a UTC ISO string. */
+    modifiedAt: string;
+    lines: OrderLine[];
+    /** OpenCart's order totals: sub_total, shipping, tax, total, coupon... */
+    totals: { code: string; title: string; value: number }[];
+    /** Status changes that have a comment. */
+    history: { statusName: string; comment: string; dateAdded: string }[];
+}
+
+type OrderRow = RowDataPacket & Record<string, string | number | null>;
+
+// The address fields of an order row, for prefix "payment" or "shipping".
+function orderAddress(row: OrderRow, prefix: string): OrderAddress {
+    const text = (field: string) => decode(String(row[`${prefix}_${field}`] ?? ""));
+    return {
+        firstName: text("firstname"),
+        lastName: text("lastname"),
+        company: text("company"),
+        address1: text("address_1"),
+        address2: text("address_2"),
+        city: text("city"),
+        postcode: text("postcode"),
+        countryCode: text("iso_code_2"),
+        zoneCode: text("zone_code"),
+        zoneName: text("zone"),
+    };
+}
+
+export async function getOrder(connection: Connection, id: number): Promise<Order> {
+    const { dbPrefix, languageId } = getSettings();
+
+    // OpenCart writes dates in PHP's time zone (it sets MySQL's session time zone
+    // to match), which can differ from MySQL's own. So dates are read as text,
+    // as OpenCart shows them, and converted with OPENCART_TIMEZONE.
+    const timeZone = requireEnv("OPENCART_TIMEZONE");
+    const [rows] = await connection.execute<OrderRow[]>(
+        `SELECT o.*, os.name AS status_name,
+            pc.iso_code_2 AS payment_iso_code_2, pz.code AS payment_zone_code,
+            sc.iso_code_2 AS shipping_iso_code_2, sz.code AS shipping_zone_code,
+            DATE_FORMAT(o.date_added, '%Y-%m-%d %H:%i:%s') AS added_text,
+            DATE_FORMAT(o.date_modified, '%Y-%m-%d %H:%i:%s') AS modified_text
+        FROM \`${dbPrefix}order\` o
+        LEFT JOIN \`${dbPrefix}order_status\` os
+            ON os.order_status_id = o.order_status_id AND os.language_id = ?
+        LEFT JOIN \`${dbPrefix}country\` pc ON pc.country_id = o.payment_country_id
+        LEFT JOIN \`${dbPrefix}zone\` pz ON pz.zone_id = o.payment_zone_id
+        LEFT JOIN \`${dbPrefix}country\` sc ON sc.country_id = o.shipping_country_id
+        LEFT JOIN \`${dbPrefix}zone\` sz ON sz.zone_id = o.shipping_zone_id
+        WHERE o.order_id = ?`,
+        [languageId, id],
+    );
+    const row = rows[0];
+    if (!row) throw new Error(`OpenCart has no order with ID ${id}.`);
+
+    const [lineRows] = await connection.execute<RowDataPacket[]>(
+        `SELECT order_product_id, product_id, name, model, quantity, price, total, tax
+        FROM \`${dbPrefix}order_product\` WHERE order_id = ? ORDER BY order_product_id`,
+        [id],
+    );
+    const [optionRows] = await connection.execute<RowDataPacket[]>(
+        `SELECT order_product_id, name, value, type
+        FROM \`${dbPrefix}order_option\` WHERE order_id = ? ORDER BY order_option_id`,
+        [id],
+    );
+    const [totalRows] = await connection.execute<RowDataPacket[]>(
+        `SELECT code, title, value FROM \`${dbPrefix}order_total\` WHERE order_id = ? ORDER BY sort_order`,
+        [id],
+    );
+    const [historyRows] = await connection.execute<RowDataPacket[]>(
+        `SELECT os.name AS status_name, oh.comment, DATE_FORMAT(oh.date_added, '%Y-%m-%d %H:%i') AS added_text
+        FROM \`${dbPrefix}order_history\` oh
+        LEFT JOIN \`${dbPrefix}order_status\` os
+            ON os.order_status_id = oh.order_status_id AND os.language_id = ?
+        WHERE oh.order_id = ? AND oh.comment <> ''
+        ORDER BY oh.date_added, oh.order_history_id`,
+        [languageId, id],
+    );
+
+    return {
+        id: Number(row.order_id),
+        customerId: Number(row.customer_id),
+        email: String(row.email),
+        telephone: String(row.telephone),
+        statusId: Number(row.order_status_id),
+        statusName: decode(String(row.status_name ?? "")),
+        currencyCode: String(row.currency_code),
+        currencyValue: Number(row.currency_value),
+        total: Number(row.total),
+        comment: decode(String(row.comment ?? "")),
+        // Payment extensions like Mollie put a logo <img> before the name.
+        paymentMethod: decode(String(row.payment_method ?? "").replace(/<[^>]*>/g, "")).trim(),
+        shippingCode: String(row.shipping_code ?? ""),
+        payment: orderAddress(row, "payment"),
+        shipping: row.shipping_method ? orderAddress(row, "shipping") : null,
+        dateAdded: String(row.added_text).slice(0, 16),
+        processedAt: zonedTimeToUtc(String(row.added_text), timeZone),
+        modifiedAt: zonedTimeToUtc(String(row.modified_text), timeZone),
+        lines: lineRows.map((line) => ({
+            productId: line.product_id,
+            name: decode(line.name),
+            model: decode(line.model),
+            quantity: line.quantity,
+            price: Number(line.price),
+            total: Number(line.total),
+            tax: Number(line.tax),
+            options: optionRows
+                .filter((option) => option.order_product_id === line.order_product_id)
+                .map((option) => ({ name: decode(option.name), value: decode(option.value), type: option.type })),
+        })),
+        totals: totalRows.map((total) => ({ code: total.code, title: decode(total.title), value: Number(total.value) })),
+        history: historyRows.map((history) => ({
+            statusName: decode(history.status_name ?? ""),
+            comment: decode(history.comment),
+            dateAdded: history.added_text,
+        })),
+    };
+}
+
+// Every real order ID, in order. Orders with status 0 are left out: they are
+// OpenCart's "missing orders", checkouts the customer never completed.
+export async function getOrderIds(connection: Connection): Promise<number[]> {
+    const { dbPrefix } = getSettings();
+    const [rows] = await connection.execute<RowDataPacket[]>(
+        `SELECT order_id FROM \`${dbPrefix}order\` WHERE order_status_id > 0 ORDER BY order_id`,
+    );
+    return rows.map((row) => row.order_id as number);
 }

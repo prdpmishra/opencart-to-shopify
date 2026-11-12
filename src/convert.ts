@@ -3,9 +3,11 @@ import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js"
 import type {
     Attribute,
     Customer,
-    CustomerAddress,
     FullProduct,
     OptionValue,
+    Order,
+    OrderAddress,
+    OrderLine,
     ProductOption,
     Special,
 } from "./opencart.ts";
@@ -380,7 +382,7 @@ export function toCustomerInput(customer: Customer): CustomerInput {
     };
 }
 
-export function toAddressInput(address: CustomerAddress): AddressInput {
+export function toAddressInput(address: OrderAddress): AddressInput {
     return {
         firstName: tidyText(address.firstName),
         lastName: tidyText(address.lastName),
@@ -412,4 +414,263 @@ export function sameAddress(
         zip(wanted.zip) === zip(current.zip) &&
         (wanted.provinceCode === undefined || text(wanted.provinceCode) === text(current.provinceCode))
     );
+}
+
+// "2026-06-04 22:53:32" as a clock in the given time zone (e.g. "Europe/Berlin")
+// → that moment in UTC, as Shopify wants it: "2026-06-04T20:53:32.000Z".
+export function zonedTimeToUtc(dateTime: string, timeZone: string): string {
+    const wall = new Date(`${dateTime.replace(" ", "T")}Z`).getTime();
+    if (Number.isNaN(wall)) throw new Error(`Not a date: "${dateTime}".`);
+    const format = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    });
+    // How far the zone's clock is ahead of UTC at a moment (e.g. 2 hours in a German summer).
+    const offset = (moment: number) => {
+        const p = Object.fromEntries(format.formatToParts(moment).map((part) => [part.type, Number(part.value)]));
+        return Date.UTC(p.year!, p.month! - 1, p.day!, p.hour!, p.minute!, p.second!) - moment;
+    };
+    // The offset is looked up twice, so a date near a daylight saving change gets the right one.
+    const guess = wall - offset(wall);
+    return new Date(wall - offset(guess)).toISOString();
+}
+
+// One line, for the console. Works for both our AddressInput and Shopify's
+// addresses (which use null for empty fields).
+export function describeAddress(a: { [K in keyof AddressInput]?: string | null | undefined }): string {
+    return [
+        `${a.firstName} ${a.lastName}`,
+        a.company,
+        a.address1,
+        a.address2,
+        `${a.zip} ${a.city}`.trim(),
+        a.provinceCode,
+        a.countryCode,
+    ]
+        .filter(Boolean)
+        .join(", ");
+}
+
+// Amounts in Shopify's MoneyBagInput form, in the shop's currency.
+interface MoneyBag {
+    shopMoney: { amount: string; currencyCode: string };
+}
+
+interface TaxLine {
+    title: string;
+    rate: number; // 0.2 for 20%
+    priceSet: MoneyBag;
+}
+
+// The parts of Shopify's OrderCreateOrderInput that we fill in.
+export interface OrderInput {
+    currency: string;
+    processedAt: string;
+    email?: string;
+    phone?: string;
+    note: string;
+    tags: string[];
+    taxesIncluded: boolean;
+    financialStatus: FinancialStatus;
+    fulfillmentStatus?: "FULFILLED";
+    customer?: { toAssociate: { id: string } };
+    billingAddress: AddressInput;
+    shippingAddress?: AddressInput;
+    lineItems: {
+        variantId?: string;
+        title: string;
+        sku?: string;
+        quantity: number;
+        priceSet: MoneyBag; // unit price
+        requiresShipping: boolean;
+        taxLines?: TaxLine[];
+        // Options that aren't variants, e.g. a text the customer typed.
+        properties?: { name: string; value: string }[];
+    }[];
+    shippingLines: { title: string; code: string; priceSet: MoneyBag; taxLines?: TaxLine[] }[];
+    transactions: {
+        kind: "SALE" | "REFUND";
+        status: "SUCCESS";
+        gateway: string;
+        amountSet: MoneyBag;
+        processedAt: string;
+    }[];
+}
+
+type FinancialStatus = "PENDING" | "PAID" | "REFUNDED" | "VOIDED" | "EXPIRED";
+
+// OpenCart's default order statuses → Shopify. OpenCart lets shop owners add or
+// rename statuses, so this goes by ID. Canceled, Denied, Failed and the
+// chargeback statuses have no Shopify equivalent for a new order.
+const ORDER_STATUSES: Record<number, { financialStatus: FinancialStatus; fulfilled: boolean }> = {
+    1: { financialStatus: "PENDING", fulfilled: false }, // Pending
+    2: { financialStatus: "PAID", fulfilled: false }, // Processing
+    15: { financialStatus: "PAID", fulfilled: false }, // Processed
+    3: { financialStatus: "PAID", fulfilled: true }, // Shipped
+    5: { financialStatus: "PAID", fulfilled: true }, // Complete
+    11: { financialStatus: "REFUNDED", fulfilled: false }, // Refunded
+    14: { financialStatus: "EXPIRED", fulfilled: false }, // Expired
+    16: { financialStatus: "VOIDED", fulfilled: false }, // Voided
+};
+
+// Whether an order with this OpenCart status can be migrated.
+export function canMigrateOrderStatus(statusId: number): boolean {
+    return statusId in ORDER_STATUSES;
+}
+
+// Select and radio options are the ones migrated products have as variants.
+const isVariantOption = (option: OrderLine["options"][number]) =>
+    option.type === "select" || option.type === "radio";
+
+// The Shopify variant an order line was for: the one with the options the
+// customer chose. A product without options has a single variant.
+// Returns null if there is no such variant (any more).
+export function matchVariant(
+    variants: { id: string; selectedOptions: { name: string; value: string }[] }[],
+    options: OrderLine["options"],
+): string | null {
+    const chosen = options.filter(isVariantOption);
+    if (chosen.length === 0) return variants.length === 1 ? variants[0]!.id : null;
+    const match = variants.find(
+        (variant) =>
+            variant.selectedOptions.length === chosen.length &&
+            variant.selectedOptions.every((selected) =>
+                chosen.some((c) => c.name.trim() === selected.name && c.value.trim() === selected.value),
+            ),
+    );
+    return match?.id ?? null;
+}
+
+// "VAT (20%)" → "VAT": Shopify shows the rate next to the title itself.
+function taxTitle(title: string): string {
+    return title.replace(/\s*\(\s*[\d.,]+\s*%\s*\)\s*$/, "").trim() || title;
+}
+
+// Turns an OpenCart order into Shopify's orderCreate input. Amounts stay in the
+// store currency, as OpenCart stores them.
+// variantIds: the Shopify variant for each line (null: not migrated, so the
+// line keeps only its title, SKU and price). customerId: the Shopify customer,
+// null for a guest order.
+// Throws if the order has totals Shopify can't show (e.g. a coupon) or doesn't add up.
+export function toOrderInput(
+    order: Order,
+    currency: string,
+    variantIds: (string | null)[],
+    customerId: string | null,
+): OrderInput {
+    const status = ORDER_STATUSES[order.statusId];
+    if (!status) throw new Error(`OpenCart order status "${order.statusName}" can't be migrated.`);
+    const money = (amount: number): MoneyBag => ({
+        shopMoney: { amount: roundCents(amount).toFixed(2), currencyCode: currency },
+    });
+    const rate = (tax: number, price: number) => (price > 0 ? Math.round((tax / price) * 10000) / 10000 : 0);
+
+    for (const total of order.totals)
+        if (!["sub_total", "shipping", "tax", "total"].includes(total.code))
+            throw new Error(`The order total "${total.title}" (${total.code}) isn't supported.`);
+    const taxTotals = order.totals.filter((t) => t.code === "tax");
+    if (taxTotals.length > 1)
+        throw new Error(`The order has ${taxTotals.length} taxes (${taxTotals.map((t) => t.title).join(", ")}); only one is supported.`);
+    const tax = taxTotals[0];
+    const shipping = order.totals.find((t) => t.code === "shipping");
+
+    const lineItems: OrderInput["lineItems"] = order.lines.map((line, i) => {
+        const variantId = variantIds[i] ?? undefined;
+        // Options that are part of the variant show as its title; the rest as properties.
+        const properties = line.options
+            .filter((option) => !variantId || !isVariantOption(option))
+            .map((option) => ({ name: option.name, value: option.value }));
+        const lineTax = roundCents(line.tax * line.quantity);
+        return {
+            ...(variantId && { variantId }),
+            title: tidyText(line.name),
+            // A variant brings its own SKU; OpenCart's order only has the model.
+            ...(!variantId && line.model.trim() && { sku: line.model.trim() }),
+            quantity: line.quantity,
+            // From the line total: OpenCart may have charged less than the unit price.
+            priceSet: money(line.total / line.quantity),
+            requiresShipping: order.shipping !== null,
+            ...(tax && lineTax > 0 && {
+                taxLines: [{ title: taxTitle(tax.title), rate: rate(line.tax, line.price), priceSet: money(lineTax) }],
+            }),
+            ...(properties.length > 0 && { properties }),
+        };
+    });
+
+    // OpenCart doesn't store the shipping tax separately: it's what's left of the tax.
+    const linesTax = order.lines.reduce((sum, line) => sum + roundCents(line.tax * line.quantity), 0);
+    const shippingTax = tax ? roundCents(tax.value - linesTax) : 0;
+    const shippingLines: OrderInput["shippingLines"] = shipping
+        ? [
+              {
+                  title: shipping.title,
+                  code: order.shippingCode,
+                  priceSet: money(shipping.value),
+                  ...(tax && shippingTax > 0 && {
+                      taxLines: [{ title: taxTitle(tax.title), rate: rate(shippingTax, shipping.value), priceSet: money(shippingTax) }],
+                  }),
+              },
+          ]
+        : [];
+
+    const sum = order.lines.reduce((s, line) => s + line.total, 0) + (shipping?.value ?? 0) + (tax?.value ?? 0);
+    if (roundCents(sum) !== roundCents(order.total))
+        throw new Error(`The order's lines, shipping and tax add up to ${roundCents(sum)}, not its total ${order.total}.`);
+
+    const gateway = order.paymentMethod || "manual";
+    const transaction = (kind: "SALE" | "REFUND", processedAt: string) => ({
+        kind,
+        status: "SUCCESS" as const,
+        gateway,
+        amountSet: money(order.total),
+        processedAt,
+    });
+    const transactions =
+        status.financialStatus === "PAID"
+            ? [transaction("SALE", order.processedAt)]
+            : status.financialStatus === "REFUNDED"
+              ? [transaction("SALE", order.processedAt), transaction("REFUND", order.modifiedAt)]
+              : [];
+
+    const email = order.email.trim().toLowerCase();
+    const phone = toE164(order.telephone, order.payment.countryCode || undefined);
+
+    return {
+        currency,
+        processedAt: order.processedAt,
+        ...(email && { email }),
+        ...(phone && { phone }),
+        note: orderNote(order, currency),
+        tags: ["OpenCart"],
+        taxesIncluded: false, // OpenCart prices exclude tax
+        financialStatus: status.financialStatus,
+        ...(status.fulfilled && { fulfillmentStatus: "FULFILLED" as const }),
+        ...(customerId && { customer: { toAssociate: { id: customerId } } }),
+        billingAddress: toAddressInput(order.payment),
+        ...(order.shipping && { shippingAddress: toAddressInput(order.shipping) }),
+        lineItems,
+        shippingLines,
+        transactions,
+    };
+}
+
+// The order's background, for the note on the Shopify order: the OpenCart
+// number, what the customer paid in their currency, comments and history.
+function orderNote(order: Order, currency: string): string {
+    const lines = [`Migrated from OpenCart: order #${order.id}, placed ${order.dateAdded}, status ${order.statusName}.`];
+    if (order.paymentMethod) lines.push(`Payment method: ${order.paymentMethod}`);
+    if (order.currencyCode !== currency)
+        lines.push(`Paid in ${order.currencyCode}: ${roundCents(order.total * order.currencyValue).toFixed(2)} ${order.currencyCode}`);
+    if (order.comment.trim()) lines.push(`Customer comment: ${order.comment.trim()}`);
+    if (order.history.length > 0) {
+        lines.push("History:");
+        for (const h of order.history) lines.push(`- ${h.dateAdded} ${h.statusName}: ${h.comment.trim()}`);
+    }
+    return lines.join("\n");
 }

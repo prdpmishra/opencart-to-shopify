@@ -1424,3 +1424,20 @@ export async function setEmailMarketing(customerId: string, subscribed: boolean,
     );
     throwUserErrors("Shopify rejected the marketing consent", customerEmailMarketingConsentUpdate.userErrors);
 }
+
+export interface VariantOptions {
+    id: string;
+    selectedOptions: { name: string; value: string }[];
+}
+
+// A product's variants with their option values, or null if the product no
+// longer exists. Only the first 250 (one page): more would be unusual for an OpenCart product.
+export async function getProductVariants(productId: string): Promise<VariantOptions[] | null> {
+    const { product } = await graphql<{ product: { variants: { nodes: VariantOptions[] } } | null }>(
+        `query ($id: ID!) {
+            product(id: $id) { variants(first: 250) { nodes { id selectedOptions { name value } } } }
+        }`,
+        { id: productId },
+    );
+    return product?.variants.nodes ?? null;
+}

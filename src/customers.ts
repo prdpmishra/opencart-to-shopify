@@ -5,6 +5,7 @@
 import type { Connection } from "mysql2/promise";
 import { parseArgs } from "node:util";
 import {
+    describeAddress,
     sameAddress,
     toAddressInput,
     toCustomerInput,
@@ -402,21 +403,6 @@ async function phoneFor(input: CustomerInput, customerId: string | null): Promis
             "This customer gets no phone.",
     );
     return null;
-}
-
-// Works for both our AddressInput and Shopify's addresses (which use null for empty fields).
-function describeAddress(a: { [K in keyof AddressInput]?: string | null | undefined }): string {
-    return [
-        `${a.firstName} ${a.lastName}`,
-        a.company,
-        a.address1,
-        a.address2,
-        `${a.zip} ${a.city}`.trim(),
-        a.provinceCode,
-        a.countryCode,
-    ]
-        .filter(Boolean)
-        .join(", ");
 }
 
 main();

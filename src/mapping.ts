@@ -3,8 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 
 // "attribute" maps an OpenCart attribute to a Shopify metafield definition,
 // "customer" an OpenCart customer to a Shopify customer, "address" a customer
-// address to a Shopify customer address.
-export type EntityType = "product" | "category" | "attribute" | "customer" | "address";
+// address to a Shopify customer address, "order" an OpenCart order to a Shopify order.
+export type EntityType = "product" | "category" | "attribute" | "customer" | "address" | "order";
 
 export interface Mapping {
     opencart_id: number;
