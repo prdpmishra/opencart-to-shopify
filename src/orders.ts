@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import {
     canMigrateOrderStatus,
     describeAddress,
+    isNotificationEvent,
     matchVariant,
     roundCents,
     toOrderInput,
@@ -26,11 +27,13 @@ import {
     adminOrderUrl,
     createOrder,
     deleteOrder,
+    getOrderEvents,
     findCustomerIdByEmail,
     getProductVariants,
     getShopCurrency,
     getShopifyCustomer,
     setDefaultCustomerAddress,
+    type CreatedOrder,
 } from "./shopify.ts";
 
 const USAGE =
@@ -101,6 +104,11 @@ async function main() {
                 const message = error instanceof Error ? error.message : String(error);
                 failures.push(`  ${orderId}: ${message}`);
                 console.error(`Failed: ${message}`);
+                if (error instanceof NotificationSentError) {
+                    counts.set(result, (counts.get(result) ?? 0) + 1);
+                    console.error("Stopped: the remaining orders were not migrated.");
+                    break;
+                }
             }
             counts.set(result, (counts.get(result) ?? 0) + 1);
         }
@@ -199,6 +207,7 @@ async function migrateOrder(connection: Connection, id: number, currency: string
 
     let created = await createOrder(input);
     saveMapping("order", order.id, created.id);
+    await checkNoNotification(created);
 
     // Shopify keeps a province code it doesn't know (e.g. any code for the
     // Netherlands, which has no provinces in Shopify) as plain text, which its
@@ -225,6 +234,7 @@ async function migrateOrder(connection: Connection, id: number, currency: string
         deleteMappingByShopifyId("order", created.id);
         created = await createOrder(input);
         saveMapping("order", order.id, created.id);
+        await checkNoNotification(created);
     }
 
     console.log(`Created Shopify order ${created.name}: ${adminOrderUrl(created.id)}`);
@@ -236,6 +246,25 @@ async function migrateOrder(connection: Connection, id: number, currency: string
         if (now !== defaultAddressId) await setDefaultCustomerAddress(created.customerId, defaultAddressId);
     }
     return "created";
+}
+
+// Thrown when Shopify notified someone about a migrated order. It stops --all.
+class NotificationSentError extends Error {}
+
+// Migrated orders are history, not new orders: createOrder asks Shopify not to
+// send anything, but notifications set up in the store (Shopify Flow, Shopify
+// Email automations, apps) are outside its control. So each order's timeline is
+// checked, and the run stops at the first notification, before other customers
+// get one too.
+async function checkNoNotification(created: CreatedOrder): Promise<void> {
+    const sent = (await getOrderEvents(created.id)).filter(isNotificationEvent);
+    if (sent.length === 0) return;
+    throw new NotificationSentError(
+        `Shopify sent a notification for order ${created.name} (${adminOrderUrl(created.id)}): ` +
+            sent.map((e) => e.message.replace(/<[^>]*>/g, "")).join(" ") +
+            " Stopping, so no other customer is notified. Turn off the store's notifications and " +
+            "automations for new orders (Shopify Flow, Shopify Email, apps) before running again.",
+    );
 }
 
 // Leaves out province codes Shopify refused or didn't keep before (for an order

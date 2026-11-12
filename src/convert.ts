@@ -558,6 +558,14 @@ export function matchVariant(
     return match?.id ?? null;
 }
 
+// Whether an event on an order's timeline says Shopify notified someone, e.g.
+// "Order confirmation email was sent to Jan (jan@example.com)." or an SMS.
+// Migrated orders are history and must never do that. "Confirmation #ABC was
+// generated" is only the order's confirmation number, not a message.
+export function isNotificationEvent(event: { action: string | null; message: string }): boolean {
+    return /mail|sms|notif/i.test(event.action ?? "") || /\b(e-?mail|sms|text message|notification)\b/i.test(event.message);
+}
+
 // "VAT (20%)" → "VAT": Shopify shows the rate next to the title itself.
 function taxTitle(title: string): string {
     return title.replace(/\s*\(\s*[\d.,]+\s*%\s*\)\s*$/, "").trim() || title;

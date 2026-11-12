@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { canMigrateOrderStatus, matchVariant, toOrderInput, utcOffset, zonedTimeToUtc } from "./convert.ts";
+import { canMigrateOrderStatus, isNotificationEvent, matchVariant, toOrderInput, utcOffset, zonedTimeToUtc } from "./convert.ts";
 import type { Order, OrderAddress, OrderLine } from "./opencart.ts";
 
 function address(changes: Partial<OrderAddress> = {}): OrderAddress {
@@ -315,4 +315,26 @@ describe("toOrderInput", () => {
             ].join("\n"),
         );
     });
+});
+
+describe("isNotificationEvent", () => {
+    // What Shopify logged for the migrated orders: none of it is a notification.
+    const migrated = [
+        { action: "placed", message: "Pradeep Mishra placed this order on OpenCart Migrator." },
+        { action: "confirmation_number_generated", message: "Confirmation #INQ5TDR81 was generated for this order." },
+        { action: "note_created", message: "OpenCart Migrator added a note to this order." },
+        { action: "confirmed", message: "Received new order <a href=\"/orders/1\">#1013</a> by Test Test." },
+        { action: "sale_success", message: "A $127.20 USD payment was processed on Bancontact." },
+        { action: "refund_success", message: "OpenCart Migrator refunded $127.20 USD to Bancontact." },
+    ];
+    for (const event of migrated) it(`ignores "${event.action}"`, () => assert.ok(!isNotificationEvent(event)));
+
+    it("sees an order confirmation email", () =>
+        assert.ok(isNotificationEvent({ action: null, message: "Order confirmation email was sent to Jan (jan@example.com)." })));
+    it("sees a shipping confirmation email", () =>
+        assert.ok(isNotificationEvent({ action: null, message: "Shipping confirmation e-mail for #1001-F1 was sent to Jan." })));
+    it("sees an SMS", () => assert.ok(isNotificationEvent({ action: null, message: "Order confirmation SMS was sent to +31612345678." })));
+    it("sees a mail action", () => assert.ok(isNotificationEvent({ action: "mail_sent", message: "Sent." })));
+    it("sees a notification", () =>
+        assert.ok(isNotificationEvent({ action: null, message: "Refund notification was sent to the customer." })));
 });

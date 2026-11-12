@@ -1481,7 +1481,16 @@ export async function createOrder(input: OrderInput): Promise<CreatedOrder> {
             }`,
             {
                 order: input,
-                options: { sendReceipt: false, sendFulfillmentReceipt: false, inventoryBehaviour: "BYPASS" },
+                // A migrated order is history, not a new sale. These are Shopify's
+                // defaults too, but are sent anyway so a change of defaults can't
+                // make the migration email customers or take stock again.
+                // (OrderInput has no "fulfillment" input, whose notifyCustomer
+                // would be another way to send a shipping email.)
+                options: {
+                    sendReceipt: false, // no order confirmation email
+                    sendFulfillmentReceipt: false, // no shipping confirmation email
+                    inventoryBehaviour: "BYPASS", // don't reduce stock
+                },
             },
         );
         // Development stores may only create about 5 orders a minute. Shopify says
@@ -1510,4 +1519,18 @@ export async function deleteOrder(id: string): Promise<void> {
         { id },
     );
     throwUserErrors("Shopify didn't delete the order", orderDelete.userErrors);
+}
+
+// The events on an order's timeline, newest last, e.g. { action: "placed",
+// message: "Jan placed this order on OpenCart Migrator." }.
+export async function getOrderEvents(orderId: string): Promise<{ action: string | null; message: string }[]> {
+    const { order } = await graphql<{
+        order: { events: { nodes: { action: string | null; message: string }[] } } | null;
+    }>(
+        `query ($id: ID!) {
+            order(id: $id) { events(first: 100, sortKey: CREATED_AT) { nodes { action message } } }
+        }`,
+        { id: orderId },
+    );
+    return order?.events.nodes ?? [];
 }
