@@ -1,8 +1,8 @@
 # OpenCart to Shopify
 
-Migrates products and customers from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
+Migrates products, customers and order history from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts. Customers are migrated with their addresses, phone number and newsletter consent (see [Customers](#customers-npm-run-customers)).
+For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts. Customers are migrated with their addresses, phone number and newsletter consent (see [Customers](#customers-npm-run-customers)), and orders as history (see [Orders](#orders-npm-run-orders)).
 
 ## Requirements
 
@@ -11,10 +11,10 @@ For now it migrates one product at a time with its basic details, images, varian
 - A Shopify app with these scopes:
 
   ```
-  read_products,write_products,read_files,write_files,read_inventory,write_inventory,read_locations,read_publications,write_publications,read_online_store_navigation,write_online_store_navigation,read_discounts,write_discounts,read_customers,write_customers
+  read_products,write_products,read_files,write_files,read_inventory,write_inventory,read_locations,read_publications,write_publications,read_online_store_navigation,write_online_store_navigation,read_discounts,write_discounts,read_customers,write_customers,read_orders,write_orders
   ```
 
-  All of them are used: products, files, inventory, locations, publications (sales channels), online store navigation (URL redirects and the main menu), discounts and customers. The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
+  All of them are used: products, files, inventory, locations, publications (sales channels), online store navigation (URL redirects and the main menu), discounts, customers and orders. The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
 
   Customers also need **protected customer data access**: without it, Shopify answers "This app is not approved to access the Customer object", even with the customer scopes. In the Partner Dashboard, open the app, go to **API access requests → Protected customer data access → Request access**, select **Protected customer data** and then the **Name, Email, Phone and Address** fields, each with a reason, and save. For an app installed only on development stores, that's all: no review or data protection details are needed. (The Dev Dashboard has no page for this.)
 
@@ -37,6 +37,7 @@ LANGUAGE_ID=1
 OPENCART_IMAGE_DIR=C:\xampp\htdocs\opencart\image
 OPENCART_IMAGE_URL=http://localhost/opencart/image/
 OPENCART_STORE_URL=http://localhost/opencart/
+OPENCART_TIMEZONE=Europe/Berlin
 
 # Shopify app
 SHOPIFY_SHOP=my-store
@@ -56,6 +57,7 @@ PRICE_TAX_RATE=
 | `OPENCART_IMAGE_DIR` | Yes, for `migrate` | OpenCart's `image` folder on this computer |
 | `OPENCART_STORE_URL` | Yes, for `migrate` | OpenCart's store URL (`HTTP_SERVER` in its `config.php`). Only its path is used for redirects: set it to the live shop's URL before the real migration. |
 | `OPENCART_IMAGE_URL` | Yes, for `migrate` | The URL of that folder as used in descriptions, e.g. `http://localhost/opencart/image/` |
+| `OPENCART_TIMEZONE` | Yes | PHP's time zone on the OpenCart server (`date.timezone` in `php.ini`), e.g. `Europe/Berlin`. OpenCart sets MySQL's time zone to PHP's, so its dates are in this zone, not MySQL's own; the migration does the same, so specials and availability dates are checked as OpenCart checks them, and order and discount dates reach Shopify at the right moment. |
 | `SHOPIFY_SHOP` | Yes | `my-store` or `my-store.myshopify.com` |
 | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | Yes | From the Shopify app's settings |
 | `SHOPIFY_API_VERSION` | Yes | Admin API version, e.g. `2026-10` |
@@ -77,6 +79,8 @@ npm run menu                     # replace Shopify's main menu with OpenCart's c
 npm run customers -- 1 --dry-run # show what would be sent for OpenCart customer 1
 npm run customers -- --all       # create every customer not migrated yet
 npm run customers -- --all --update  # also update the ones already migrated
+npm run orders -- 7 --dry-run    # show the order that would be created for OpenCart order 7
+npm run orders -- --all          # create every real order not migrated yet
 npm start                        # list OpenCart and Shopify products
 npm run typecheck                # type-check without running
 npm test                         # unit tests (no database or Shopify needed)
@@ -138,7 +142,7 @@ OpenCart's quantity discounts ("buy 10 or more for 88.00 each") become Shopify *
 - **Amount:** a fixed amount off each item, the normal price minus the tier price (plus `PRICE_TAX_RATE` when Shopify's prices include tax). In OpenCart, option price modifiers are added on top of the tier price, so every variant gets the same amount off. A tier that isn't lower than the normal price gives a warning.
 - **Minimum quantity:** all variants of the product in the cart count towards it, as in OpenCart.
 - **Tiers:** the discounts don't combine with each other, so Shopify applies only the biggest tier reached. They do combine with order and shipping discounts (e.g. discount codes), as coupons do in OpenCart.
-- **Dates:** OpenCart's start and end dates become the discount's start and end, so Shopify schedules them itself. Tiers that have already ended aren't migrated.
+- **Dates:** OpenCart's start and end dates become the discount's start and end (midnight in `OPENCART_TIMEZONE`, when OpenCart switches too), so Shopify schedules them itself. Tiers that have already ended aren't migrated.
 - **Title** (shown at checkout): e.g. `Buy 10+, save $12.00 each`, in the shop's currency.
 
 Only tiers for OpenCart's default customer group are migrated; others give a warning, as does a second tier with the same quantity (OpenCart's choice, lowest priority and then price, is used).
@@ -182,7 +186,22 @@ The menu is compared with Shopify's first: if it's the same, nothing is changed,
 
 Each customer and address is remembered in `migration.sqlite`, saved straight after it's created. With `--update`, OpenCart is the source of truth: the email, name, phone, note and tags (tags added in Shopify are removed), the addresses, the default address and the email marketing state are brought in line, and only the differences are printed and sent. Addresses added in Shopify are kept; migrated addresses removed in OpenCart are deleted, and one deleted in Shopify is added again. Unsubscribing in OpenCart unsubscribes in Shopify. A subscription made by `--update` is dated at the time of the run: Shopify silently ignores a consent change dated before the previous one, and keeps the history, so a customer who unsubscribed shows "unsubscribed", not "not subscribed". A disabled customer is left as it is in Shopify.
 
-`migration.sqlite` records which products, categories, attributes, description images, redirects, discounts, customers and addresses have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
+### Orders (`npm run orders`)
+
+`npm run orders -- <id>|--all [--dry-run]` creates OpenCart orders in Shopify as order history. Migrate the products and customers first: an order from a registered customer who isn't migrated yet fails with an error, and a line whose product isn't migrated isn't linked to a product. `--all` only goes through real orders: orders with status 0 are OpenCart's "missing orders", checkouts that were never completed, and are skipped. Orders are created once; there is no `--update` (Shopify orders can hardly be changed afterwards), and a migrated order is skipped.
+
+- **No side effects:** no order confirmation or shipping emails are sent, and stock isn't touched (OpenCart already took the sold items off, and the products' stock was migrated after that).
+- **Number and date:** Shopify numbers the orders itself (`#1001`, …), as an OpenCart number could clash with Shopify's own. The OpenCart number is in the note. The order date is OpenCart's order date (see `OPENCART_TIMEZONE`).
+- **Money:** the amounts OpenCart stored, in its default currency, which must be the Shopify shop's currency (the run stops otherwise). What the customer paid in their own currency is in the note, e.g. `Paid in EUR: 99.80 EUR`. A line's price is its line total divided by the quantity, as that is what the customer was charged; a warning is printed when that's below the product price.
+- **Lines:** linked to the migrated product's variant with the options the customer chose (select/radio). Other options (text, date, …) become line item properties. A product that isn't in Shopify keeps its name, model (as SKU) and price as a line without a product.
+- **Shipping and tax:** the shipping method with its price. OpenCart prices exclude tax; the tax goes on each line and on shipping (OpenCart doesn't store the shipping tax separately, so it's the order's tax minus the lines' tax), titled as Shopify does (`VAT (20%)` → `VAT` at 20%). Orders with more than one tax, or with totals Shopify orders can't show (coupons, vouchers, reward points, fees), fail with an error.
+- **Status:** OpenCart's default statuses by ID: Pending → payment pending; Processing and Processed → paid; Shipped and Complete → paid and fulfilled; Refunded → paid and refunded (dated at the order's last change); Expired and Voided → the same in Shopify. Canceled, Denied, Failed, Reversed, Chargeback and Canceled Reversal can't be created in Shopify and are skipped with a warning. OpenCart has no refund records, only comments, so a refund is always the full amount, and Shopify's refund record shows the date of the run (its transaction has OpenCart's date).
+- **Customer:** a registered customer's order is linked to the migrated customer. A guest order keeps its email, and Shopify links it to the customer with that email, creating one if there is none, as it does for its own guest checkouts. Shopify also adds the order's addresses to that customer's addresses and makes the last one the default; the run puts the customer's own default back.
+- **Addresses:** billing and shipping address as for customers. Shopify keeps a province code it doesn't know as plain text (its own orders never have that), e.g. for countries without provinces in Shopify such as the Netherlands and the United Kingdom. When that happens, the code is remembered in `migration.sqlite`, the order is deleted and created again without it, and later orders don't send it. Each of these uses up an order number, so the order numbers have gaps.
+- **Note and tag:** the note has the OpenCart number, date and status, the payment method, the paid currency, the customer's comment and the status history comments. Orders are tagged `OpenCart`.
+- **Not migrated:** OpenCart's order statuses as such, invoice numbers, affiliate and marketing data, IP address and user agent, vouchers and returns. Shopify allows development stores about 5 new orders a minute; the run waits a minute when it reaches that.
+
+`migration.sqlite` records which products, categories, attributes, description images, redirects, discounts, customers, addresses and orders have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
 
 ## Project structure
 
@@ -191,15 +210,16 @@ src/
   migrate.ts   Migrate one product (npm run migrate)
   menu.ts      OpenCart category menu → Shopify main menu (npm run menu)
   customers.ts Migrate customers with their addresses (npm run customers)
+  orders.ts    Migrate orders as history (npm run orders)
   index.ts     List products from both stores (npm start)
   env.ts       requireEnv() for reading environment variables
-  opencart.ts  Database connection, product and customer queries
-  convert.ts   OpenCart product/customer → Shopify input, handle building
+  opencart.ts  Database connection, product, customer and order queries
+  convert.ts   OpenCart product/customer/order → Shopify input, handle building, time zones
   shopify.ts   Access token, graphql() helper and product creation
   collections.ts  OpenCart categories → Shopify collections
   attributes.ts   OpenCart attributes → Shopify metafield definitions
   discounts.ts OpenCart quantity discounts → Shopify automatic discounts
   description.ts  Images inside descriptions → Shopify Files
-  mapping.ts   SQLite mapping of migrated products, categories, attributes, customers, addresses, files, redirects and discounts
+  mapping.ts   SQLite mapping of migrated products, categories, attributes, customers, addresses, orders, files, redirects and discounts
   redirects.ts Old OpenCart URLs → Shopify URL redirects
 ```

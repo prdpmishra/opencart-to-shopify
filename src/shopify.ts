@@ -1452,6 +1452,10 @@ export interface CreatedOrder {
     id: string;
     name: string; // e.g. "#1001"
     customerId: string | null;
+    // The province codes Shopify recognised; null when it didn't know the code
+    // sent (it keeps that as plain text) or none was sent.
+    billingProvinceCode: string | null;
+    shippingProvinceCode: string | null;
 }
 
 // Creates an order as history: no confirmation or shipping emails to the
@@ -1459,11 +1463,19 @@ export interface CreatedOrder {
 export async function createOrder(input: OrderInput): Promise<CreatedOrder> {
     for (let attempt = 0; ; attempt++) {
         const { orderCreate } = await graphql<{
-            orderCreate: { order: { id: string; name: string; customer: { id: string } | null } | null } & UserErrorsResult;
+            orderCreate: {
+                order: {
+                    id: string;
+                    name: string;
+                    customer: { id: string } | null;
+                    billingAddress: { provinceCode: string | null } | null;
+                    shippingAddress: { provinceCode: string | null } | null;
+                } | null;
+            } & UserErrorsResult;
         }>(
             `mutation ($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
                 orderCreate(order: $order, options: $options) {
-                    order { id name customer { id } }
+                    order { id name customer { id } billingAddress { provinceCode } shippingAddress { provinceCode } }
                     userErrors { field message }
                 }
             }`,
@@ -1480,7 +1492,22 @@ export async function createOrder(input: OrderInput): Promise<CreatedOrder> {
         }
         throwUserErrors("Shopify rejected the order", orderCreate.userErrors);
         if (!orderCreate.order) throw new Error("Shopify returned no order.");
-        const { id, name, customer } = orderCreate.order;
-        return { id, name, customerId: customer?.id ?? null };
+        const { id, name, customer, billingAddress, shippingAddress } = orderCreate.order;
+        return {
+            id,
+            name,
+            customerId: customer?.id ?? null,
+            billingProvinceCode: billingAddress?.provinceCode ?? null,
+            shippingProvinceCode: shippingAddress?.provinceCode ?? null,
+        };
     }
+}
+
+// Deletes an order for good.
+export async function deleteOrder(id: string): Promise<void> {
+    const { orderDelete } = await graphql<{ orderDelete: UserErrorsResult }>(
+        `mutation ($id: ID!) { orderDelete(orderId: $id) { userErrors { field message } } }`,
+        { id },
+    );
+    throwUserErrors("Shopify didn't delete the order", orderDelete.userErrors);
 }

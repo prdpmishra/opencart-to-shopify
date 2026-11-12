@@ -4,10 +4,34 @@
 //        npm run orders -- --all [--dry-run]
 import type { Connection } from "mysql2/promise";
 import { parseArgs } from "node:util";
-import { canMigrateOrderStatus, describeAddress, matchVariant, roundCents, toOrderInput, type AddressInput, type OrderInput } from "./convert.ts";
-import { findMapping, findUnacceptedProvince, saveMapping } from "./mapping.ts";
+import {
+    canMigrateOrderStatus,
+    describeAddress,
+    matchVariant,
+    roundCents,
+    toOrderInput,
+    type AddressInput,
+    type OrderInput,
+} from "./convert.ts";
+import {
+    deleteMappingByShopifyId,
+    findMapping,
+    findUnacceptedProvince,
+    saveMapping,
+    saveUnacceptedProvince,
+} from "./mapping.ts";
 import { connect, getOrder, getOrderIds, getStoreCurrency } from "./opencart.ts";
-import { adminCustomerUrl, adminOrderUrl, createOrder, getProductVariants, getShopCurrency } from "./shopify.ts";
+import {
+    adminCustomerUrl,
+    adminOrderUrl,
+    createOrder,
+    deleteOrder,
+    findCustomerIdByEmail,
+    getProductVariants,
+    getShopCurrency,
+    getShopifyCustomer,
+    setDefaultCustomerAddress,
+} from "./shopify.ts";
 
 const USAGE =
     "Usage: npm run orders -- <opencart-order-id> [--dry-run]\n" +
@@ -151,22 +175,75 @@ async function migrateOrder(connection: Connection, id: number, currency: string
     }
 
     const input = toOrderInput(order, currency, variantIds, customerId);
-    // Province codes Shopify refused or dropped for customer addresses aren't sent.
+    // Billing and shipping address are often the same: one warning per code.
+    const unaccepted = new Set<string>();
     for (const address of [input.billingAddress, input.shippingAddress])
         if (address?.countryCode && address.provinceCode && findUnacceptedProvince(address.countryCode, address.provinceCode))
-            address.provinceCode = null;
+            unaccepted.add(`"${address.provinceCode}" for ${address.countryCode}`);
+    for (const code of unaccepted)
+        console.warn(`Warning: Shopify doesn't accept OpenCart's province code ${code}, so the address has no province.`);
+    dropUnacceptedProvinces(input);
 
     if (dryRun) {
         printOrder(input, customerId);
         return "dry run";
     }
 
-    const created = await createOrder(input);
+    // Shopify adds the order's addresses to the customer's address book (as its
+    // checkout does) and makes the last one the default. The customer's own
+    // default is put back afterwards: OpenCart decides which address that is.
+    const existingCustomerId = customerId ?? (input.email ? await findCustomerIdByEmail(input.email) : null);
+    const defaultAddressId = existingCustomerId
+        ? ((await getShopifyCustomer(existingCustomerId))?.defaultAddressId ?? null)
+        : null;
+
+    let created = await createOrder(input);
     saveMapping("order", order.id, created.id);
+
+    // Shopify keeps a province code it doesn't know (e.g. any code for the
+    // Netherlands, which has no provinces in Shopify) as plain text, which its
+    // own orders never have. Such codes are remembered and not sent again, and
+    // the order is made again without them: it can't be fixed afterwards, as
+    // orderUpdate can't change the billing address.
+    const unknown = [
+        { sent: input.billingAddress, kept: created.billingProvinceCode, zoneName: order.payment.zoneName },
+        ...(input.shippingAddress
+            ? [{ sent: input.shippingAddress, kept: created.shippingProvinceCode, zoneName: order.shipping?.zoneName ?? "" }]
+            : []),
+    ].filter(({ sent, kept }) => sent.countryCode && sent.provinceCode && !kept);
+    if (unknown.length > 0) {
+        for (const { sent, zoneName } of unknown) {
+            if (findUnacceptedProvince(sent.countryCode!, sent.provinceCode!)) continue; // both addresses
+            saveUnacceptedProvince(sent.countryCode!, sent.provinceCode!, false);
+            console.warn(
+                `Warning: Shopify doesn't know the province code "${sent.provinceCode}" (${zoneName}) for ${sent.countryCode}, ` +
+                    "so it isn't sent. The order is created again without it.",
+            );
+        }
+        dropUnacceptedProvinces(input);
+        await deleteOrder(created.id);
+        deleteMappingByShopifyId("order", created.id);
+        created = await createOrder(input);
+        saveMapping("order", order.id, created.id);
+    }
+
     console.log(`Created Shopify order ${created.name}: ${adminOrderUrl(created.id)}`);
     if (!customerId && created.customerId)
         console.log(`Guest order, linked by Shopify to the customer with its email: ${adminCustomerUrl(created.customerId)}`);
+
+    if (created.customerId && created.customerId === existingCustomerId && defaultAddressId) {
+        const now = (await getShopifyCustomer(created.customerId))?.defaultAddressId;
+        if (now !== defaultAddressId) await setDefaultCustomerAddress(created.customerId, defaultAddressId);
+    }
     return "created";
+}
+
+// Leaves out province codes Shopify refused or didn't keep before (for an order
+// or a customer address), so the address has no province, like Shopify's own.
+function dropUnacceptedProvinces(input: OrderInput): void {
+    for (const address of [input.billingAddress, input.shippingAddress])
+        if (address?.countryCode && address.provinceCode && findUnacceptedProvince(address.countryCode, address.provinceCode))
+            address.provinceCode = null;
 }
 
 function printOrder(input: OrderInput, customerId: string | null): void {

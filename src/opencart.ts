@@ -1,6 +1,6 @@
 import mysql, { type RowDataPacket, type Connection } from "mysql2/promise";
 import { decode } from "he";
-import { zonedTimeToUtc } from "./convert.ts";
+import { utcOffset, zonedTimeToUtc } from "./convert.ts";
 import { requireEnv } from "./env.ts";
 
 interface ProductRow extends RowDataPacket {
@@ -16,12 +16,18 @@ export interface Product {
 }
 
 export async function connect(): Promise<Connection> {
-    return mysql.createConnection({
+    const timeZone = requireEnv("OPENCART_TIMEZONE");
+    const connection = await mysql.createConnection({
         host: requireEnv("DB_HOST"),
         user: requireEnv("DB_USER"),
         password: requireEnv("DB_PASSWORD", true),
         database: requireEnv("DB_NAME"),
     });
+    // OpenCart sets MySQL's time zone to PHP's current UTC offset, so NOW() in
+    // its queries (is a special active? is a product available yet?) gives
+    // PHP's time. Doing the same here makes those checks agree with OpenCart.
+    await connection.query("SET time_zone = ?", [utcOffset(timeZone)]);
+    return connection;
 }
 
 interface FullProductRow extends RowDataPacket {
@@ -361,9 +367,9 @@ interface DiscountRow extends RowDataPacket {
     quantity: number;
     price: string;
     for_default_group: number;
-    // Seconds since 1970, or null for 0000-00-00 ("no date").
-    starts_at: number | null;
-    ends_at: number | null;
+    // "2026-06-01", or null for 0000-00-00 ("no date").
+    starts_at: string | null;
+    ends_at: string | null;
 }
 
 // The special price OpenCart shows right now to the default customer group, its
@@ -409,14 +415,15 @@ export async function getPriceRules(
             };
     }
 
-    // OpenCart compares the dates with MySQL's NOW(), so MySQL turns them into
-    // moments too (UNIX_TIMESTAMP uses the same time zone as NOW()).
+    // A date means midnight at its start in OpenCart's time zone (OpenCart
+    // compares it with NOW()), so that's the moment Shopify gets.
+    const timeZone = requireEnv("OPENCART_TIMEZONE");
     const [rows] = await connection.execute<DiscountRow[]>(
         `SELECT pd.quantity, pd.price,
             pd.customer_group_id = (SELECT value FROM \`${dbPrefix}setting\`
                 WHERE store_id = 0 AND \`key\` = 'config_customer_group_id') AS for_default_group,
-            IF(pd.date_start = '0000-00-00', NULL, UNIX_TIMESTAMP(pd.date_start)) AS starts_at,
-            IF(pd.date_end = '0000-00-00', NULL, UNIX_TIMESTAMP(pd.date_end)) AS ends_at
+            IF(pd.date_start = '0000-00-00', NULL, CAST(pd.date_start AS CHAR)) AS starts_at,
+            IF(pd.date_end = '0000-00-00', NULL, CAST(pd.date_end AS CHAR)) AS ends_at
         FROM \`${dbPrefix}product_discount\` pd
         WHERE pd.product_id = ? AND (pd.date_end = '0000-00-00' OR pd.date_end > NOW())
         ORDER BY pd.quantity, pd.priority, pd.price`,
@@ -434,8 +441,8 @@ export async function getPriceRules(
             discounts.push({
                 quantity: row.quantity,
                 price: Number(row.price),
-                startsAt: row.starts_at === null ? null : new Date(Number(row.starts_at) * 1000),
-                endsAt: row.ends_at === null ? null : new Date(Number(row.ends_at) * 1000),
+                startsAt: row.starts_at === null ? null : new Date(zonedTimeToUtc(`${row.starts_at} 00:00:00`, timeZone)),
+                endsAt: row.ends_at === null ? null : new Date(zonedTimeToUtc(`${row.ends_at} 00:00:00`, timeZone)),
             });
     }
 

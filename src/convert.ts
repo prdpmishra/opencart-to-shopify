@@ -421,6 +421,22 @@ export function sameAddress(
 export function zonedTimeToUtc(dateTime: string, timeZone: string): string {
     const wall = new Date(`${dateTime.replace(" ", "T")}Z`).getTime();
     if (Number.isNaN(wall)) throw new Error(`Not a date: "${dateTime}".`);
+    // The offset is looked up twice, so a date near a daylight saving change gets the right one.
+    const guess = wall - offsetMs(timeZone, wall);
+    return new Date(wall - offsetMs(timeZone, guess)).toISOString();
+}
+
+// The zone's UTC offset at a moment, as MySQL and PHP write it, e.g. "+02:00"
+// for Europe/Berlin in summer.
+export function utcOffset(timeZone: string, moment: number = Date.now()): string {
+    const minutes = Math.round(offsetMs(timeZone, moment) / 60000);
+    const abs = Math.abs(minutes);
+    return `${minutes < 0 ? "-" : "+"}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+}
+
+// How far the zone's clock is ahead of UTC at a moment, in milliseconds
+// (e.g. 2 hours in a German summer). Throws for an unknown time zone.
+function offsetMs(timeZone: string, moment: number): number {
     const format = new Intl.DateTimeFormat("en-US", {
         timeZone,
         hourCycle: "h23",
@@ -431,14 +447,9 @@ export function zonedTimeToUtc(dateTime: string, timeZone: string): string {
         minute: "2-digit",
         second: "2-digit",
     });
-    // How far the zone's clock is ahead of UTC at a moment (e.g. 2 hours in a German summer).
-    const offset = (moment: number) => {
-        const p = Object.fromEntries(format.formatToParts(moment).map((part) => [part.type, Number(part.value)]));
-        return Date.UTC(p.year!, p.month! - 1, p.day!, p.hour!, p.minute!, p.second!) - moment;
-    };
-    // The offset is looked up twice, so a date near a daylight saving change gets the right one.
-    const guess = wall - offset(wall);
-    return new Date(wall - offset(guess)).toISOString();
+    const p = Object.fromEntries(format.formatToParts(moment).map((part) => [part.type, Number(part.value)]));
+    // Whole seconds: the moment's milliseconds aren't part of the formatted clock.
+    return Date.UTC(p.year!, p.month! - 1, p.day!, p.hour!, p.minute!, p.second!) - Math.floor(moment / 1000) * 1000;
 }
 
 // One line, for the console. Works for both our AddressInput and Shopify's
