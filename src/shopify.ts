@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { requireEnv } from "./env.ts";
-import type { AddressInput, CustomerInput, ProductSetInput } from "./convert.ts";
+import type { AddressInput, CustomerInput, OrderInput, ProductSetInput } from "./convert.ts";
 
 interface TokenResponse {
     access_token: string;
@@ -1440,4 +1440,47 @@ export async function getProductVariants(productId: string): Promise<VariantOpti
         { id: productId },
     );
     return product?.variants.nodes ?? null;
+}
+
+// "gid://shopify/Order/123" → the order's page in Shopify admin.
+export function adminOrderUrl(orderId: string): string {
+    const store = requireEnv("SHOPIFY_SHOP").replace(/\.myshopify\.com$/, "");
+    return `https://admin.shopify.com/store/${store}/orders/${orderId.split("/").pop()}`;
+}
+
+export interface CreatedOrder {
+    id: string;
+    name: string; // e.g. "#1001"
+    customerId: string | null;
+}
+
+// Creates an order as history: no confirmation or shipping emails to the
+// customer, and stock isn't touched (OpenCart already took it off).
+export async function createOrder(input: OrderInput): Promise<CreatedOrder> {
+    for (let attempt = 0; ; attempt++) {
+        const { orderCreate } = await graphql<{
+            orderCreate: { order: { id: string; name: string; customer: { id: string } | null } | null } & UserErrorsResult;
+        }>(
+            `mutation ($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+                orderCreate(order: $order, options: $options) {
+                    order { id name customer { id } }
+                    userErrors { field message }
+                }
+            }`,
+            {
+                order: input,
+                options: { sendReceipt: false, sendFulfillmentReceipt: false, inventoryBehaviour: "BYPASS" },
+            },
+        );
+        // Development stores may only create about 5 orders a minute. Shopify says
+        // so as a user error, not a THROTTLED error, so graphql() doesn't wait for it.
+        if (orderCreate.userErrors.some((e) => e.message.includes("Too many attempts")) && attempt < MAX_RETRIES) {
+            await waitSeconds(60, "Shopify's limit on new orders");
+            continue;
+        }
+        throwUserErrors("Shopify rejected the order", orderCreate.userErrors);
+        if (!orderCreate.order) throw new Error("Shopify returned no order.");
+        const { id, name, customer } = orderCreate.order;
+        return { id, name, customerId: customer?.id ?? null };
+    }
 }

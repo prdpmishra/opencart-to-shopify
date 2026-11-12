@@ -1,20 +1,20 @@
 // Migrates OpenCart orders to Shopify as order history.
 //
-// Usage: npm run orders -- <opencart-order-id> --dry-run
-//        npm run orders -- --all --dry-run
+// Usage: npm run orders -- <opencart-order-id> [--dry-run]
+//        npm run orders -- --all [--dry-run]
 import type { Connection } from "mysql2/promise";
 import { parseArgs } from "node:util";
 import { canMigrateOrderStatus, describeAddress, matchVariant, roundCents, toOrderInput, type AddressInput, type OrderInput } from "./convert.ts";
-import { findMapping, findUnacceptedProvince } from "./mapping.ts";
+import { findMapping, findUnacceptedProvince, saveMapping } from "./mapping.ts";
 import { connect, getOrder, getOrderIds, getStoreCurrency } from "./opencart.ts";
-import { adminCustomerUrl, getProductVariants, getShopCurrency } from "./shopify.ts";
+import { adminCustomerUrl, adminOrderUrl, createOrder, getProductVariants, getShopCurrency } from "./shopify.ts";
 
 const USAGE =
-    "Usage: npm run orders -- <opencart-order-id> --dry-run\n" +
-    "       npm run orders -- --all --dry-run";
+    "Usage: npm run orders -- <opencart-order-id> [--dry-run]\n" +
+    "       npm run orders -- --all [--dry-run]";
 
 // What happened to one order.
-type Result = "skipped" | "dry run";
+type Result = "created" | "skipped" | "dry run";
 
 async function main() {
     let args;
@@ -37,7 +37,7 @@ async function main() {
     const dryRun = args.values["dry-run"];
     const id = Number(args.positionals[0]);
     const validId = args.positionals.length === 1 && Number.isInteger(id) && id >= 1;
-    if ((all ? args.positionals.length > 0 : !validId) || !dryRun) {
+    if (all ? args.positionals.length > 0 : !validId) {
         console.error(USAGE);
         process.exitCode = 1;
         return;
@@ -58,7 +58,7 @@ async function main() {
             );
 
         if (!all) {
-            await migrateOrder(connection, id, currency);
+            await migrateOrder(connection, id, currency, dryRun);
             return;
         }
 
@@ -71,7 +71,7 @@ async function main() {
             console.log(`\n── Order ${orderId} (${i + 1}/${ids.length}) ──`);
             let result: Result | "failed";
             try {
-                result = await migrateOrder(connection, orderId, currency);
+                result = await migrateOrder(connection, orderId, currency, dryRun);
             } catch (error) {
                 result = "failed";
                 const message = error instanceof Error ? error.message : String(error);
@@ -96,10 +96,10 @@ async function main() {
 }
 
 // Migrates one order, or skips it. Errors are thrown to the caller.
-async function migrateOrder(connection: Connection, id: number, currency: string): Promise<Result> {
+async function migrateOrder(connection: Connection, id: number, currency: string, dryRun: boolean): Promise<Result> {
     const existing = findMapping("order", id);
     if (existing) {
-        console.log(`Order ${id} was already migrated (${existing.shopify_id}). Nothing to do.`);
+        console.log(`Order ${id} was already migrated: ${adminOrderUrl(existing.shopify_id)}. Nothing to do.`);
         return "skipped";
     }
 
@@ -117,8 +117,9 @@ async function migrateOrder(connection: Connection, id: number, currency: string
         return "skipped";
     }
 
-    // A registered customer's order goes to the migrated Shopify customer; guest
-    // orders get no customer (only the email and addresses).
+    // A registered customer's order goes to the migrated Shopify customer. For a
+    // guest order, Shopify links the customer with the order's email itself,
+    // creating one if there is none (as it does for its own guest checkouts).
     let customerId: string | null = null;
     if (order.customerId > 0) {
         customerId = findMapping("customer", order.customerId)?.shopify_id ?? null;
@@ -155,8 +156,17 @@ async function migrateOrder(connection: Connection, id: number, currency: string
         if (address?.countryCode && address.provinceCode && findUnacceptedProvince(address.countryCode, address.provinceCode))
             address.provinceCode = null;
 
-    printOrder(input, customerId);
-    return "dry run";
+    if (dryRun) {
+        printOrder(input, customerId);
+        return "dry run";
+    }
+
+    const created = await createOrder(input);
+    saveMapping("order", order.id, created.id);
+    console.log(`Created Shopify order ${created.name}: ${adminOrderUrl(created.id)}`);
+    if (!customerId && created.customerId)
+        console.log(`Guest order, linked by Shopify to the customer with its email: ${adminCustomerUrl(created.customerId)}`);
+    return "created";
 }
 
 function printOrder(input: OrderInput, customerId: string | null): void {
@@ -167,7 +177,7 @@ function printOrder(input: OrderInput, customerId: string | null): void {
 
     console.log("Would create a Shopify order:");
     console.log(`  Date:     ${input.processedAt}`);
-    console.log(`  Customer: ${customerId ? adminCustomerUrl(customerId) : "(guest, no customer)"}`);
+    console.log(`  Customer: ${customerId ? adminCustomerUrl(customerId) : "(guest: Shopify links the customer with this email, or creates one)"}`);
     console.log(`  Email:    ${input.email ?? "(none)"}   Phone: ${input.phone ?? "(none)"}`);
     console.log(`  Status:   ${input.financialStatus}, ${input.fulfillmentStatus ?? "UNFULFILLED"}`);
     for (const line of input.lineItems) {
