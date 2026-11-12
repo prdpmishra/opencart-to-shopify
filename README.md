@@ -2,7 +2,7 @@
 
 Migrates products, customers and order history from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts. Customers are migrated with their addresses, phone number and newsletter consent (see [Customers](#customers-npm-run-customers)), and orders as history (see [Orders](#orders-npm-run-orders)).
+For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, related products, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts. Customers are migrated with their addresses, phone number and newsletter consent (see [Customers](#customers-npm-run-customers)), and orders as history (see [Orders](#orders-npm-run-orders)).
 
 ## Requirements
 
@@ -81,6 +81,8 @@ npm run customers -- --all       # create every customer not migrated yet
 npm run customers -- --all --update  # also update the ones already migrated
 npm run orders -- 7 --dry-run    # show the order that would be created for OpenCart order 7
 npm run orders -- --all          # create every real order not migrated yet
+npm run related -- --dry-run     # show the related products that would be set
+npm run related                  # copy OpenCart's related products to Shopify
 npm start                        # list OpenCart and Shopify products
 npm run typecheck                # type-check without running
 npm test                         # unit tests (no database or Shopify needed)
@@ -201,6 +203,12 @@ Each customer and address is remembered in `migration.sqlite`, saved straight af
 - **Note and tag:** the note has the OpenCart number, date and status, the payment method, the paid currency, the customer's comment and the status history comments. Orders are tagged `OpenCart`.
 - **Not migrated:** OpenCart's order statuses as such, invoice numbers, affiliate and marketing data, IP address and user agent, vouchers and returns. Shopify allows development stores about 5 new orders a minute; the run waits a minute when it reaches that.
 
+### Related products (`npm run related`)
+
+Copies OpenCart's "Related Products" (the product's Links tab) to Shopify's standard "Related products" metafield (`shopify--discovery--product_recommendation.related_products`), which Shopify's product recommendations use (the theme's "Related products" section) and the [Search & Discovery](https://apps.shopify.com/search-and-discovery) app edits. The run enables that metafield definition when it isn't yet. Run it after the products are migrated: a link to a product that isn't migrated is left out with a warning.
+
+OpenCart is the source of truth: each migrated product's list is replaced with OpenCart's (in product ID order, as OpenCart has no sort order for them), and cleared if the product has none in OpenCart. Lists that already match are left alone, so the command can be rerun. Product reviews are not migrated, as Shopify has no built-in reviews.
+
 `migration.sqlite` records which products, categories, attributes, description images, redirects, discounts, customers, addresses and orders have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
 
 ## Project structure
@@ -211,6 +219,7 @@ src/
   menu.ts      OpenCart category menu → Shopify main menu (npm run menu)
   customers.ts Migrate customers with their addresses (npm run customers)
   orders.ts    Migrate orders as history (npm run orders)
+  related.ts   OpenCart related products → Shopify related products (npm run related)
   index.ts     List products from both stores (npm start)
   env.ts       requireEnv() for reading environment variables
   opencart.ts  Database connection, product, customer and order queries

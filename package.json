@@ -11,7 +11,8 @@
         "menu": "tsx --env-file=.env src/menu.ts",
         "customers": "tsx --env-file=.env src/customers.ts",
         "typecheck": "tsc --noEmit",
-        "orders": "tsx --env-file=.env src/orders.ts"
+        "orders": "tsx --env-file=.env src/orders.ts",
+        "related": "tsx --env-file=.env src/related.ts"
     },
     "keywords": [],
     "author": "",

@@ -908,6 +908,48 @@ export async function createProductMetafieldDefinition(input: {
     return metafieldDefinitionCreate.createdDefinition.id;
 }
 
+// Turns on one of Shopify's standard product metafield definitions (for example
+// Search & Discovery's "Related products"), pinned like the ones Shopify admin enables.
+export async function enableStandardProductMetafieldDefinition(namespace: string, key: string): Promise<string> {
+    const { standardMetafieldDefinitionEnable } = await graphql<{
+        standardMetafieldDefinitionEnable: { createdDefinition: { id: string } | null } & UserErrorsResult;
+    }>(
+        `mutation EnableStandardDefinition($namespace: String!, $key: String!) {
+            standardMetafieldDefinitionEnable(ownerType: PRODUCT, namespace: $namespace, key: $key, pin: true) {
+                createdDefinition { id }
+                userErrors { field message }
+            }
+        }`,
+        { namespace, key },
+    );
+    throwUserErrors("Could not enable the metafield definition", standardMetafieldDefinitionEnable.userErrors);
+    if (!standardMetafieldDefinitionEnable.createdDefinition) throw new Error("Shopify returned no metafield definition.");
+    return standardMetafieldDefinitionEnable.createdDefinition.id;
+}
+
+// The value of one metafield on each product: product ID → value (null if not set).
+// Products that no longer exist in Shopify are left out.
+export async function getProductMetafieldValues(
+    productIds: string[],
+    namespace: string,
+    key: string,
+): Promise<Map<string, string | null>> {
+    const values = new Map<string, string | null>();
+    // nodes takes at most 250 IDs at a time.
+    for (let i = 0; i < productIds.length; i += 250) {
+        const { nodes } = await graphql<{ nodes: ({ id: string; metafield: { value: string } | null } | null)[] }>(
+            `query ProductMetafieldValues($ids: [ID!]!, $namespace: String!, $key: String!) {
+                nodes(ids: $ids) {
+                    ... on Product { id metafield(namespace: $namespace, key: $key) { value } }
+                }
+            }`,
+            { ids: productIds.slice(i, i + 250), namespace, key },
+        );
+        for (const node of nodes) if (node) values.set(node.id, node.metafield?.value ?? null);
+    }
+    return values;
+}
+
 // Creates or updates these metafields on the product; others are left as they are.
 export async function setProductMetafields(
     productId: string,

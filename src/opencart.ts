@@ -637,6 +637,27 @@ export async function getProductIds(connection: Connection): Promise<number[]> {
     return rows.map((row) => row.product_id);
 }
 
+interface RelatedRow extends RowDataPacket {
+    product_id: number;
+    related_id: number;
+}
+
+// The "Related Products" links (Links tab), as product ID → related product IDs.
+// Links to products that no longer exist are left out.
+export async function getRelatedProducts(connection: Connection): Promise<Map<number, number[]>> {
+    const { dbPrefix } = getSettings();
+    const [rows] = await connection.execute<RelatedRow[]>(
+        `SELECT pr.product_id, pr.related_id
+         FROM \`${dbPrefix}product_related\` pr
+         JOIN \`${dbPrefix}product\` p ON p.product_id = pr.product_id
+         JOIN \`${dbPrefix}product\` r ON r.product_id = pr.related_id
+         ORDER BY pr.product_id, pr.related_id`,
+    );
+    const related = new Map<number, number[]>();
+    for (const row of rows) related.set(row.product_id, [...(related.get(row.product_id) ?? []), row.related_id]);
+    return related;
+}
+
 // Whether OpenCart's "Use SEO URLs" setting is on (URLs like /desktops/mac instead of index.php?...).
 export async function getSeoUrlsEnabled(connection: Connection): Promise<boolean> {
     const { dbPrefix } = getSettings();
