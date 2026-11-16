@@ -684,6 +684,30 @@ export function toOrderInput(
                 "than the products' rate, so the order's tax can't be split over its lines.",
         );
 
+    // OpenCart keeps amounts to 4 decimals and rounds only the total, which is
+    // what the customer paid. Shopify adds up the parts in cents, which can be a
+    // cent or two off: that goes on the tax too, so the order isn't left with a
+    // cent to pay or to refund.
+    const sentTax = tax ? lineTaxes.filter((t) => t > 0).reduce((s, t) => s + t, 0) + Math.max(chargeTax, 0) : 0;
+    const shopifyTotal =
+        order.lines.reduce((s, line) => s + roundCents(line.total / line.quantity) * line.quantity, 0) +
+        charges.reduce((s, c) => s + roundCents(c.value), 0) +
+        sentTax -
+        (coupon ? roundCents(-coupon.value) : 0);
+    const paidTotal = vouchers.reduce((s, v) => s + roundCents(-v.value), 0) + roundCents(order.total);
+    const rounding = roundCents(paidTotal - shopifyTotal);
+    if (rounding !== 0) {
+        if (Math.abs(rounding) > 0.05)
+            throw new Error(`The order's parts add up to ${roundCents(shopifyTotal)} in cents, not its total ${roundCents(paidTotal)}.`);
+        if (tax && last >= 0 && lineTaxes[last]! + rounding > 0) lineTaxes[last] = roundCents(lineTaxes[last]! + rounding);
+        else if (tax && taxedCharge >= 0 && chargeTax + rounding > 0) chargeTax = roundCents(chargeTax + rounding);
+        else
+            throw new Error(
+                `The order's parts add up to ${roundCents(shopifyTotal)} in cents, not its total ${roundCents(paidTotal)}, ` +
+                    "and it has no tax to put the difference on.",
+            );
+    }
+
     const lineItems: OrderInput["lineItems"] = order.lines.map((line, i) => {
         const variantId = variantIds[i] ?? undefined;
         // Options that are part of the variant show as its title; the rest as properties.

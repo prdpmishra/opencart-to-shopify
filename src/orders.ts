@@ -172,8 +172,14 @@ async function migrateOrder(connection: Connection, id: number, currency: string
     // A registered customer's order goes to the migrated Shopify customer. For a
     // guest order, Shopify links the customer with the order's email itself,
     // creating one if there is none (as it does for its own guest checkouts).
+    // An order whose customer account was deleted in OpenCart is like a guest's.
     let customerId: string | null = null;
-    if (order.customerId > 0) {
+    if (order.customerDeleted)
+        console.warn(
+            `Warning: OpenCart customer ${order.customerId} was deleted, so the order is migrated like a guest order: ` +
+                "Shopify links it to the customer with its email.",
+        );
+    else if (order.customerId > 0) {
         customerId = findMapping("customer", order.customerId)?.shopify_id ?? null;
         if (!customerId)
             throw new Error(

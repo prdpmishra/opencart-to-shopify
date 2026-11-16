@@ -28,6 +28,7 @@ function order(changes: Partial<Order> = {}): Order {
     return {
         id: 7,
         customerId: 0,
+        customerDeleted: false,
         email: "Jan@Example.com ",
         telephone: "",
         statusId: 1,
@@ -469,6 +470,49 @@ describe("toOrderInput", () => {
 
     it("puts a rounding cent of tax on the last taxed line", () =>
         assert.deepEqual(toOrderInput(withoutShipping(20.21), "USD", [VARIANT], null).lineItems[0]!.taxLines?.[0]?.priceSet, money("20.21")));
+
+    it("puts the cent from rounding the parts on the tax, so the total is what was paid", () => {
+        // OpenCart keeps 4 decimals: the parts round to 371.07 + 2.07 + 78.36 = 451.50,
+        // but the customer paid the rounded total, 451.49.
+        const input = toOrderInput(
+            order({
+                total: 451.4946,
+                lines: [line({ price: 371.07, total: 371.07, tax: 77.9247 })],
+                totals: [
+                    { code: "sub_total", title: "Sub-Total", value: 371.07 },
+                    { code: "shipping", title: "Flat Shipping Rate", value: 2.066 },
+                    { code: "tax", title: "VAT (21%)", value: 78.3586 },
+                    { code: "total", title: "Total", value: 451.4946 },
+                ],
+            }),
+            "USD",
+            [VARIANT],
+            null,
+        );
+        assert.equal(input.lineItems[0]!.taxLines?.[0]?.priceSet.shopMoney.amount, "77.91");
+        assert.equal(input.shippingLines[0]!.priceSet.shopMoney.amount, "2.07");
+        assert.equal(input.shippingLines[0]!.taxLines?.[0]?.priceSet.shopMoney.amount, "0.44");
+    });
+
+    it("refuses a rounding difference when there's no tax to put it on", () =>
+        assert.throws(
+            () =>
+                toOrderInput(
+                    order({
+                        shipping: null,
+                        total: 10.005,
+                        lines: [line({ quantity: 3, price: 3.335, total: 10.005 })],
+                        totals: [
+                            { code: "sub_total", title: "Sub-Total", value: 10.005 },
+                            { code: "total", title: "Total", value: 10.005 },
+                        ],
+                    }),
+                    "USD",
+                    [VARIANT],
+                    null,
+                ),
+            /no tax to put the difference on/,
+        ));
 
     it("refuses tax on shipping at a higher rate than the products'", () =>
         assert.throws(

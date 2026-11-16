@@ -833,6 +833,8 @@ export interface Order {
     id: number;
     /** 0 for a guest order. */
     customerId: number;
+    /** The customer's account was deleted in OpenCart; the order still has its ID. */
+    customerDeleted: boolean;
     email: string;
     telephone: string;
     /** 0 for a "missing order": a checkout that was never confirmed. */
@@ -926,7 +928,10 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
             pc.iso_code_2 AS payment_iso_code_2, pz.code AS payment_zone_code,
             sc.iso_code_2 AS shipping_iso_code_2, sz.code AS shipping_zone_code,
             DATE_FORMAT(o.date_added, '%Y-%m-%d %H:%i:%s') AS added_text,
-            DATE_FORMAT(o.date_modified, '%Y-%m-%d %H:%i:%s') AS modified_text
+            DATE_FORMAT(o.date_modified, '%Y-%m-%d %H:%i:%s') AS modified_text,
+            o.customer_id > 0 AND NOT EXISTS (
+                SELECT 1 FROM \`${dbPrefix}customer\` c WHERE c.customer_id = o.customer_id
+            ) AS customer_deleted
         FROM \`${dbPrefix}order\` o
         LEFT JOIN \`${dbPrefix}order_status\` os
             ON os.order_status_id = o.order_status_id AND os.language_id = ?
@@ -983,6 +988,7 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
     return {
         id: Number(row.order_id),
         customerId: Number(row.customer_id),
+        customerDeleted: Number(row.customer_deleted) === 1,
         email: String(row.email),
         telephone: String(row.telephone),
         statusId: Number(row.order_status_id),
