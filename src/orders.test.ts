@@ -277,13 +277,105 @@ describe("toOrderInput", () => {
         assert.throws(
             () =>
                 toOrderInput(
-                    order({ totals: [...order().totals, { code: "coupon", title: "Coupon (TEST)", value: -10 }] }),
+                    order({ totals: [...order().totals, { code: "reward", title: "Reward Points (10)", value: -1 }] }),
                     "USD",
                     [VARIANT],
                     null,
                 ),
-            /coupon/,
+            /"Reward Points \(10\)" \(reward\) isn't supported/,
         ));
+
+    // From a real order: 10% coupon, and 21% VAT charged on the price after it.
+    function orderWithCoupon(changes: Partial<Order> = {}): Order {
+        return order({
+            total: 899.1,
+            shipping: address(),
+            lines: [line({ price: 825.62, total: 825.62, tax: 173.38 })],
+            totals: [
+                { code: "sub_total", title: "Subtotaal", value: 825.62 },
+                { code: "shipping", title: "Gratis verzending", value: 0 },
+                { code: "coupon", title: "Kortingsbon (black2017)", value: -82.56 },
+                { code: "tax", title: "BTW (21%)", value: 156.04 },
+                { code: "total", title: "Totaal", value: 899.1 },
+            ],
+            ...changes,
+        });
+    }
+
+    it("turns a coupon into a discount code", () =>
+        assert.deepEqual(toOrderInput(orderWithCoupon(), "USD", [VARIANT], null).discountCode, {
+            itemFixedDiscountCode: { code: "black2017", amountSet: money("82.56") },
+        }));
+
+    it("takes the coupon's share off the line tax, as OpenCart charged tax after the coupon", () => {
+        const input = toOrderInput(orderWithCoupon(), "USD", [VARIANT], null);
+        assert.deepEqual(input.lineItems[0]!.taxLines, [{ title: "BTW", rate: 0.21, priceSet: money("156.04") }]);
+        assert.equal(input.shippingLines[0]!.taxLines, undefined);
+    });
+
+    it("uses the coupon's title when it has no code in brackets", () =>
+        assert.equal(
+            toOrderInput(
+                orderWithCoupon({
+                    totals: orderWithCoupon().totals.map((t) => (t.code === "coupon" ? { ...t, title: "Korting" } : t)),
+                }),
+                "USD",
+                [VARIANT],
+                null,
+            ).discountCode?.itemFixedDiscountCode.code,
+            "Korting",
+        ));
+
+    it("records a gift voucher as a payment made with it", () => {
+        // 106 paid: 100 with a voucher, the remaining 6 with iDEAL.
+        const input = toOrderInput(
+            order({
+                statusId: 5,
+                total: 6,
+                totals: [...order().totals.filter((t) => t.code !== "total"),
+                    { code: "voucher", title: "Cadeaubon (ABC)", value: -100 }, { code: "total", title: "Total", value: 6 }],
+            }),
+            "USD",
+            [VARIANT],
+            null,
+        );
+        assert.deepEqual(
+            input.transactions.map((t) => [t.kind, t.gateway, t.amountSet.shopMoney.amount]),
+            [["SALE", "Cadeaubon (ABC)", "100.00"], ["SALE", "iDEAL", "6.00"]],
+        );
+        assert.equal(input.discountCode, undefined);
+    });
+
+    it("records no payment of 0.00 when a voucher paid everything", () => {
+        const input = toOrderInput(
+            order({
+                statusId: 5,
+                total: 0,
+                totals: [...order().totals.filter((t) => t.code !== "total"),
+                    { code: "voucher", title: "Cadeaubon", value: -106 }, { code: "total", title: "Total", value: 0 }],
+            }),
+            "USD",
+            [VARIANT],
+            null,
+        );
+        assert.deepEqual(input.transactions.map((t) => t.gateway), ["Cadeaubon"]);
+    });
+
+    it("leaves out a handling fee of 0.00 and adds any other one like shipping", () => {
+        const withHandling = (value: number) =>
+            toOrderInput(
+                order({
+                    total: 106 + value,
+                    totals: [{ code: "handling", title: "Handling", value }, ...order().totals.filter((t) => t.code !== "total"),
+                        { code: "total", title: "Total", value: 106 + value }],
+                }),
+                "USD",
+                [VARIANT],
+                null,
+            ).shippingLines;
+        assert.equal(withHandling(0).length, 1);
+        assert.deepEqual(withHandling(2.5)[1], { title: "Handling", code: "handling", priceSet: money("2.50") });
+    });
 
     it("refuses an order that doesn't add up", () =>
         assert.throws(() => toOrderInput(order({ total: 110 }), "USD", [VARIANT], null), /add up/));

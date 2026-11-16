@@ -505,6 +505,8 @@ export interface OrderInput {
         properties?: { name: string; value: string }[];
     }[];
     shippingLines: { title: string; code: string; priceSet: MoneyBag; taxLines?: TaxLine[] }[];
+    // An OpenCart coupon, as a fixed discount on the products.
+    discountCode?: { itemFixedDiscountCode: { code: string; amountSet: MoneyBag } };
     transactions: {
         kind: "SALE" | "REFUND";
         status: "SUCCESS";
@@ -611,13 +613,40 @@ export function toOrderInput(
     const rate = (tax: number, price: number) => (price > 0 ? Math.round((tax / price) * 10000) / 10000 : 0);
 
     for (const total of order.totals)
-        if (!["sub_total", "shipping", "tax", "total"].includes(total.code))
+        if (!["sub_total", "shipping", "handling", "coupon", "voucher", "tax", "total"].includes(total.code))
             throw new Error(`The order total "${total.title}" (${total.code}) isn't supported.`);
     const taxTotals = order.totals.filter((t) => t.code === "tax");
     if (taxTotals.length > 1)
         throw new Error(`The order has ${taxTotals.length} taxes (${taxTotals.map((t) => t.title).join(", ")}); only one is supported.`);
     const tax = taxTotals[0];
     const shipping = order.totals.find((t) => t.code === "shipping");
+    // A handling fee of 0.00 (OpenCart's handling extension adds one to every order) is left out.
+    const handling = order.totals.filter((t) => t.code === "handling" && roundCents(t.value) !== 0);
+    const coupons = order.totals.filter((t) => t.code === "coupon");
+    if (coupons.length > 1) throw new Error(`The order has ${coupons.length} coupons; only one is supported.`);
+    const coupon = coupons[0];
+    // Gift vouchers pay for (part of) the order: OpenCart's total is what's left to pay.
+    const vouchers = order.totals.filter((t) => t.code === "voucher");
+
+    // OpenCart charges tax on the price after the coupon, but keeps each line's tax
+    // from before it. A coupon takes the same share off every product, so each
+    // line's tax goes down by that share.
+    const subTotal = order.totals.find((t) => t.code === "sub_total")?.value ?? 0;
+    const couponShare = coupon && subTotal > 0 ? -coupon.value / subTotal : 0;
+
+    // OpenCart doesn't store the shipping tax separately: it's what's left of the tax.
+    const lineTaxes = order.lines.map((line) => roundCents(line.tax * line.quantity * (1 - couponShare)));
+    let shippingTax = tax ? roundCents(tax.value - lineTaxes.reduce((sum, t) => sum + t, 0)) : 0;
+    if (shippingTax < 0) {
+        // A cent or two from rounding the shares is taken off the last taxed line.
+        const last = lineTaxes.findLastIndex((t) => t > 0);
+        if (shippingTax < -0.05 || last < 0)
+            throw new Error(
+                `The order's tax (${tax?.value}) is less than the tax on its lines (${roundCents(tax!.value - shippingTax)}).`,
+            );
+        lineTaxes[last] = roundCents(lineTaxes[last]! + shippingTax);
+        shippingTax = 0;
+    }
 
     const lineItems: OrderInput["lineItems"] = order.lines.map((line, i) => {
         const variantId = variantIds[i] ?? undefined;
@@ -625,7 +654,7 @@ export function toOrderInput(
         const properties = line.options
             .filter((option) => !variantId || !isVariantOption(option))
             .map((option) => ({ name: option.name, value: option.value }));
-        const lineTax = roundCents(line.tax * line.quantity);
+        const lineTax = lineTaxes[i]!;
         return {
             ...(variantId && { variantId }),
             title: tidyText(line.name),
@@ -642,39 +671,49 @@ export function toOrderInput(
         };
     });
 
-    // OpenCart doesn't store the shipping tax separately: it's what's left of the tax.
-    const linesTax = order.lines.reduce((sum, line) => sum + roundCents(line.tax * line.quantity), 0);
-    const shippingTax = tax ? roundCents(tax.value - linesTax) : 0;
-    const shippingLines: OrderInput["shippingLines"] = shipping
-        ? [
-              {
-                  title: shipping.title,
-                  code: order.shippingCode,
-                  priceSet: money(shipping.value),
-                  ...(tax && shippingTax > 0 && {
-                      taxLines: [{ title: taxTitle(tax.title), rate: rate(shippingTax, shipping.value), priceSet: money(shippingTax) }],
-                  }),
-              },
-          ]
-        : [];
+    const shippingLines: OrderInput["shippingLines"] = [
+        ...(shipping
+            ? [
+                  {
+                      title: shipping.title,
+                      code: order.shippingCode,
+                      priceSet: money(shipping.value),
+                      ...(tax && shippingTax > 0 && {
+                          taxLines: [{ title: taxTitle(tax.title), rate: rate(shippingTax, shipping.value), priceSet: money(shippingTax) }],
+                      }),
+                  },
+              ]
+            : []),
+        // Shopify has no handling fee; it's a charge like shipping.
+        ...handling.map((h) => ({ title: h.title, code: "handling", priceSet: money(h.value) })),
+    ];
 
-    const sum = order.lines.reduce((s, line) => s + line.total, 0) + (shipping?.value ?? 0) + (tax?.value ?? 0);
+    const add = (totals: { value: number }[]) => totals.reduce((s, t) => s + t.value, 0);
+    const sum =
+        order.lines.reduce((s, line) => s + line.total, 0) +
+        (shipping?.value ?? 0) + add(handling) + (tax?.value ?? 0) + (coupon?.value ?? 0) + add(vouchers);
     if (roundCents(sum) !== roundCents(order.total))
-        throw new Error(`The order's lines, shipping and tax add up to ${roundCents(sum)}, not its total ${order.total}.`);
+        throw new Error(
+            `The order's lines, shipping, tax, coupon and vouchers add up to ${roundCents(sum)}, not its total ${order.total}.`,
+        );
 
-    const gateway = order.paymentMethod || "manual";
-    const transaction = (kind: "SALE" | "REFUND", processedAt: string) => ({
+    // What was paid: each gift voucher, then the rest with the payment method.
+    const payments = [
+        ...vouchers.map((v) => ({ gateway: v.title, amount: -v.value })),
+        { gateway: order.paymentMethod || "manual", amount: order.total },
+    ].filter((p) => roundCents(p.amount) > 0);
+    const transaction = (kind: "SALE" | "REFUND", processedAt: string) => (p: (typeof payments)[number]) => ({
         kind,
         status: "SUCCESS" as const,
-        gateway,
-        amountSet: money(order.total),
+        gateway: p.gateway,
+        amountSet: money(p.amount),
         processedAt,
     });
     const transactions =
         status.financialStatus === "PAID"
-            ? [transaction("SALE", order.processedAt)]
+            ? payments.map(transaction("SALE", order.processedAt))
             : status.financialStatus === "REFUNDED"
-              ? [transaction("SALE", order.processedAt), transaction("REFUND", order.modifiedAt)]
+              ? [...payments.map(transaction("SALE", order.processedAt)), ...payments.map(transaction("REFUND", order.modifiedAt))]
               : [];
 
     const email = order.email.trim().toLowerCase();
@@ -695,8 +734,17 @@ export function toOrderInput(
         ...(order.shipping && { shippingAddress: toAddressInput(order.shipping) }),
         lineItems,
         shippingLines,
+        ...(coupon && {
+            discountCode: { itemFixedDiscountCode: { code: couponCode(coupon.title), amountSet: money(-coupon.value) } },
+        }),
         transactions,
     };
+}
+
+// "Kortingsbon (black2017)" → "black2017": OpenCart puts the code in brackets
+// after the coupon's name.
+function couponCode(title: string): string {
+    return /\(([^()]+)\)\s*$/.exec(title)?.[1]?.trim() || title;
 }
 
 // The order's background, for the note on the Shopify order: the OpenCart
