@@ -249,12 +249,16 @@ export function listShopifyIds(
     return rows.map((row) => row.shopify_id);
 }
 
-// The customers Shopify created for guest orders (side effects whose customer is themselves).
-export function listGuestOrderCustomers(): string[] {
-    const rows = getDb()
-        .prepare("SELECT shopify_id FROM order_side_effect WHERE shopify_id = customer_id")
-        .all() as { shopify_id: string }[];
-    return rows.map((row) => row.shopify_id);
+// The customers in the order_side_effect table: created by Shopify for a guest
+// order (the row is the customer itself), or given an address by an order.
+export function listOrderSideEffectCustomers(): { created: string[]; givenAddress: string[] } {
+    const rows = getDb().prepare("SELECT shopify_id, customer_id FROM order_side_effect").all() as {
+        shopify_id: string;
+        customer_id: string;
+    }[];
+    const created = rows.filter((row) => row.shopify_id === row.customer_id).map((row) => row.customer_id);
+    const givenAddress = rows.filter((row) => row.shopify_id !== row.customer_id).map((row) => row.customer_id);
+    return { created: [...new Set(created)], givenAddress: [...new Set(givenAddress)] };
 }
 
 // Removes a Shopify ID from every table, once the rollback deleted it (or unlinked it).

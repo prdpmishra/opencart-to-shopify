@@ -83,6 +83,8 @@ npm run orders -- 7 --dry-run    # show the order that would be created for Open
 npm run orders -- --all          # create every real order not migrated yet
 npm run related -- --dry-run     # show the related products that would be set
 npm run related                  # copy OpenCart's related products to Shopify
+npm run rollback                 # show what a rollback would delete and put back
+npm run rollback -- --yes        # undo the migration in Shopify
 npm start                        # list OpenCart and Shopify products
 npm run typecheck                # type-check without running
 npm test                         # unit tests (no database or Shopify needed)
@@ -209,7 +211,20 @@ Copies OpenCart's "Related Products" (the product's Links tab) to Shopify's stan
 
 OpenCart is the source of truth: each migrated product's list is replaced with OpenCart's (in product ID order, as OpenCart has no sort order for them), and cleared if the product has none in OpenCart. Lists that already match are left alone, so the command can be rerun. Product reviews are not migrated, as Shopify has no built-in reviews.
 
-`migration.sqlite` records which products, categories, attributes, description images, redirects, discounts, customers, addresses and orders have been migrated, so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
+### Rollback (`npm run rollback`)
+
+Undoes the migration in Shopify, using what `migration.sqlite` recorded. Without `--yes` it only shows what it would do and changes nothing; check that first. With `--yes` it:
+
+1. puts the main menu back to the items it had before `npm run menu` first replaced them;
+2. deletes, in this order: orders, customers, quantity discounts, URL redirects, products (with their images, variants and metafield values), collections, metafield definitions (and the related products definition, if the migration enabled it) and description images in Shopify Files.
+
+Only what the migration created is deleted. A customer or metafield definition that already existed in Shopify (a customer with the same email, a definition made by hand) is kept; only the addresses the migration (or Shopify, for a migrated guest order) added to such a customer are removed. The migration may have changed that customer's name, phone, note, tags and email marketing; that isn't undone. The customers Shopify created for guest orders are deleted. A customer with orders that weren't migrated (e.g. placed after going live) is never deleted, and is listed instead.
+
+Each item is removed from `migration.sqlite` as soon as it's deleted, items already deleted by hand in Shopify are only removed from it, and the run carries on after a failure. So a rollback that stopped can simply be run again, and afterwards the store can be migrated again from scratch. Shopify demo data and anything added by hand isn't touched. The province codes Shopify didn't accept are kept, as they still apply to a new run.
+
+Rolling back is meant for before going live. After that, new orders link to migrated customers and products, and deleting products takes them off the store.
+
+`migration.sqlite` records which products, categories, attributes, description images, redirects, discounts, customers, addresses and orders have been migrated, and what the rollback needs (the main menu before the migration, what already existed in Shopify, and what Shopify made itself for migrated orders), so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
 
 ## Project structure
 
@@ -220,6 +235,7 @@ src/
   customers.ts Migrate customers with their addresses (npm run customers)
   orders.ts    Migrate orders as history (npm run orders)
   related.ts   OpenCart related products → Shopify related products (npm run related)
+  rollback.ts  Undo the migration in Shopify (npm run rollback)
   index.ts     List products from both stores (npm start)
   env.ts       requireEnv() for reading environment variables
   opencart.ts  Database connection, product, customer and order queries

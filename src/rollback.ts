@@ -12,7 +12,7 @@ import {
     findState,
     forgetShopifyId,
     forgetState,
-    listGuestOrderCustomers,
+    listOrderSideEffectCustomers,
     listMappings,
     listShopifyIds,
 } from "./mapping.ts";
@@ -83,9 +83,13 @@ async function makePlan(): Promise<Plan> {
             .map((m) => m.shopify_id);
 
     // Customers: created ones (registered customers and the ones Shopify made for
-    // guest orders) are deleted; linked ones (same email, already in Shopify) are kept.
-    const createdCustomers = [...new Set([...ids("customer"), ...listGuestOrderCustomers()])];
-    const linkedCustomerIds = ids("customer", true).filter((id) => !createdCustomers.includes(id));
+    // guest orders) are deleted. Ones that already existed in Shopify are kept:
+    // linked ones (same email) and ones Shopify gave addresses from guest orders.
+    const sideEffects = listOrderSideEffectCustomers();
+    const createdCustomers = [...new Set([...ids("customer"), ...sideEffects.created])];
+    const linkedCustomerIds = [...new Set([...ids("customer", true), ...sideEffects.givenAddress])].filter(
+        (id) => !createdCustomers.includes(id),
+    );
 
     const relatedDefinition = findState("related-definition-enabled")
         ? await findProductMetafieldDefinition(RELATED.namespace, RELATED.key)
