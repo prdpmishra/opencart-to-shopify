@@ -177,6 +177,11 @@ async function migrateProduct(
         );
 
     const product = await getProduct(connection, id);
+    // E.g. what a bundle extension leaves behind; Shopify prices can't be negative.
+    if (product.price < 0) {
+        console.warn(`Warning: product ${id} has a negative price (${product.price}) in OpenCart, skipping it.`);
+        return "skipped";
+    }
     const { options, skipped } = await getProductOptions(connection, id);
 
     // Customer inputs (checkbox, text, date, file, ...) have no Shopify equivalent.

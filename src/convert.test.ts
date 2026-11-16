@@ -121,8 +121,8 @@ describe("toMetafields", () => {
     it("makes single-line custom metafields and skips empty values", () =>
         assert.deepEqual(
             toMetafields(1, [
-                { id: 2, name: "No. of Cores", group: "Processor", text: " 4\n cores " },
-                { id: 3, name: "Clockspeed", group: "Processor", text: "  " },
+                { id: 2, name: "No. of Cores", group: "Processor", text: " 4\n cores ", sharedName: false },
+                { id: 3, name: "Clockspeed", group: "Processor", text: "  ", sharedName: false },
             ]),
             [
                 {
@@ -136,6 +136,12 @@ describe("toMetafields", () => {
                 },
             ],
         ));
+
+    it("puts the group in the key and name of an attribute whose name another attribute has too", () => {
+        const [metafield] = toMetafields(1, [{ id: 7, name: "Ingangen", group: "MIDI I/O", text: "2", sharedName: true }]);
+        assert.equal(metafield!.key, "midi_i_o_ingangen");
+        assert.equal(metafield!.name, "Ingangen (MIDI I/O)");
+    });
 });
 
 describe("toProductSetInput", () => {

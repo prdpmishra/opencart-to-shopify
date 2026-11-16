@@ -244,12 +244,15 @@ export function toMetafields(productId: number, attributes: Attribute[]): Produc
             continue;
         }
 
+        // Two attributes with the same name (in different groups) would get the
+        // same key, so then the group is part of the key and the name.
+        const withGroup = attribute.sharedName && attribute.group !== "";
         metafields.push({
             attributeId: attribute.id,
-            name: attribute.name,
+            name: withGroup ? `${attribute.name} (${attribute.group})` : attribute.name,
             group: attribute.group,
             namespace: "custom",
-            key: toMetafieldKey(attribute),
+            key: toMetafieldKey(withGroup ? { id: attribute.id, name: `${attribute.group} ${attribute.name}` } : attribute),
             type: "single_line_text_field",
             value,
         });

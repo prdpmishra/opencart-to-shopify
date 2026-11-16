@@ -456,6 +456,8 @@ export interface Attribute {
     group: string;
     /** The product's value, e.g. "6.1 inch". */
     text: string;
+    /** Whether another attribute (in another group) has the same name. */
+    sharedName: boolean;
 }
 
 interface AttributeRow extends RowDataPacket {
@@ -463,6 +465,7 @@ interface AttributeRow extends RowDataPacket {
     name: string | null;
     group_name: string | null;
     text: string;
+    shared_name: number;
 }
 
 // The product's attributes (OpenCart's "Specification" tab), in the order OpenCart
@@ -471,7 +474,9 @@ export async function getProductAttributes(connection: Connection, id: number): 
     const { dbPrefix, languageId } = getSettings();
 
     const [rows] = await connection.execute<AttributeRow[]>(
-        `SELECT a.attribute_id, ad.name, agd.name AS group_name, pa.text
+        `SELECT a.attribute_id, ad.name, agd.name AS group_name, pa.text,
+            (SELECT COUNT(*) FROM \`${dbPrefix}attribute_description\` same
+                WHERE same.language_id = pa.language_id AND same.name = ad.name) > 1 AS shared_name
         FROM \`${dbPrefix}product_attribute\` pa
         JOIN \`${dbPrefix}attribute\` a ON a.attribute_id = pa.attribute_id
         JOIN \`${dbPrefix}attribute_group\` ag ON ag.attribute_group_id = a.attribute_group_id
@@ -489,6 +494,7 @@ export async function getProductAttributes(connection: Connection, id: number): 
         name: decode(row.name ?? ""),
         group: decode(row.group_name ?? ""),
         text: decode(row.text),
+        sharedName: Number(row.shared_name) === 1,
     }));
 }
 
