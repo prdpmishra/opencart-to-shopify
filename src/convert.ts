@@ -641,23 +641,48 @@ export function toOrderInput(
 
     // OpenCart charges tax on the price after the coupon, but keeps each line's tax
     // from before it. A coupon takes the same share off every product, so each
-    // line's tax goes down by that share.
+    // line's tax goes down by that share. That isn't so for a coupon that only
+    // applies to some products, or one that also takes off the shipping (and its
+    // tax): the tax can't be split over the lines then.
+    // (With shipping of 0.00 a free-shipping coupon has nothing to take off.)
+    if (coupon && order.coupon?.freeShipping && (shipping?.value ?? 0) > 0)
+        throw new Error(`The coupon "${coupon.title}" gives free shipping, which isn't supported.`);
+    if (coupon && order.coupon?.limitedToProducts)
+        throw new Error(`The coupon "${coupon.title}" only applies to some products, which isn't supported.`);
     const subTotal = order.totals.find((t) => t.code === "sub_total")?.value ?? 0;
     const couponShare = coupon && subTotal > 0 ? -coupon.value / subTotal : 0;
+    if (coupon && couponShare > 1)
+        throw new Error(`The coupon "${coupon.title}" (${-coupon.value}) is more than the products cost (${subTotal}).`);
 
-    // OpenCart doesn't store the shipping tax separately: it's what's left of the tax.
+    // Shipping and handling: Shopify has no handling fee, so it's a charge like shipping.
+    const charges = [
+        ...(shipping ? [{ title: shipping.title, code: order.shippingCode, value: shipping.value }] : []),
+        ...handling.map((h) => ({ title: h.title, code: "handling", value: h.value })),
+    ];
+    // OpenCart doesn't store the shipping tax separately: it's what's left of the
+    // tax, and it goes on the first charge that costs something.
     const lineTaxes = order.lines.map((line) => roundCents(line.tax * line.quantity * (1 - couponShare)));
-    let shippingTax = tax ? roundCents(tax.value - lineTaxes.reduce((sum, t) => sum + t, 0)) : 0;
-    if (shippingTax < 0) {
-        // A cent or two from rounding the shares is taken off the last taxed line.
-        const last = lineTaxes.findLastIndex((t) => t > 0);
-        if (shippingTax < -0.05 || last < 0)
-            throw new Error(
-                `The order's tax (${tax?.value}) is less than the tax on its lines (${roundCents(tax!.value - shippingTax)}).`,
-            );
-        lineTaxes[last] = roundCents(lineTaxes[last]! + shippingTax);
-        shippingTax = 0;
+    let chargeTax = tax ? roundCents(tax.value - lineTaxes.reduce((sum, t) => sum + t, 0)) : 0;
+    const taxedCharge = charges.findIndex((c) => c.value > 0);
+    // A cent or two from rounding the shares goes on the last taxed line.
+    const last = lineTaxes.findLastIndex((t) => t > 0);
+    if (chargeTax !== 0 && last >= 0 && (chargeTax < 0 || taxedCharge < 0) && Math.abs(chargeTax) <= 0.05) {
+        lineTaxes[last] = roundCents(lineTaxes[last]! + chargeTax);
+        chargeTax = 0;
     }
+    if (chargeTax < 0)
+        throw new Error(`The order's tax (${tax?.value}) is less than the tax on its lines (${roundCents(tax!.value - chargeTax)}).`);
+    if (chargeTax > 0 && taxedCharge < 0)
+        throw new Error(
+            `The order's tax (${tax?.value}) is ${chargeTax} more than the tax on its lines, with no shipping or fee it could be on.`,
+        );
+    // Tax on a charge at a higher rate than any product's means the split is wrong.
+    const highestRate = Math.max(0, ...order.lines.map((line) => (line.price > 0 ? line.tax / line.price : 0)));
+    if (chargeTax > 0 && highestRate > 0 && chargeTax / charges[taxedCharge]!.value > highestRate + 0.01)
+        throw new Error(
+            `The tax left for "${charges[taxedCharge]!.title}" (${chargeTax} on ${charges[taxedCharge]!.value}) is more ` +
+                "than the products' rate, so the order's tax can't be split over its lines.",
+        );
 
     const lineItems: OrderInput["lineItems"] = order.lines.map((line, i) => {
         const variantId = variantIds[i] ?? undefined;
@@ -682,22 +707,14 @@ export function toOrderInput(
         };
     });
 
-    const shippingLines: OrderInput["shippingLines"] = [
-        ...(shipping
-            ? [
-                  {
-                      title: shipping.title,
-                      code: order.shippingCode,
-                      priceSet: money(shipping.value),
-                      ...(tax && shippingTax > 0 && {
-                          taxLines: [{ title: taxTitle(tax.title), rate: rate(shippingTax, shipping.value), priceSet: money(shippingTax) }],
-                      }),
-                  },
-              ]
-            : []),
-        // Shopify has no handling fee; it's a charge like shipping.
-        ...handling.map((h) => ({ title: h.title, code: "handling", priceSet: money(h.value) })),
-    ];
+    const shippingLines: OrderInput["shippingLines"] = charges.map((charge, i) => ({
+        title: charge.title,
+        code: charge.code,
+        priceSet: money(charge.value),
+        ...(tax && i === taxedCharge && chargeTax > 0 && {
+            taxLines: [{ title: taxTitle(tax.title), rate: rate(chargeTax, charge.value), priceSet: money(chargeTax) }],
+        }),
+    }));
 
     const add = (totals: { value: number }[]) => totals.reduce((s, t) => s + t.value, 0);
     const sum =
@@ -764,7 +781,7 @@ export function toOrderInput(
 
 // "Kortingsbon (black2017)" → "black2017": OpenCart puts the code in brackets
 // after the coupon's name.
-function couponCode(title: string): string {
+export function couponCode(title: string): string {
     return /\(([^()]+)\)\s*$/.exec(title)?.[1]?.trim() || title;
 }
 

@@ -1,6 +1,6 @@
 import mysql, { type RowDataPacket, type Connection } from "mysql2/promise";
 import { decode } from "he";
-import { utcOffset, zonedTimeToUtc } from "./convert.ts";
+import { couponCode, utcOffset, zonedTimeToUtc } from "./convert.ts";
 import { requireEnv } from "./env.ts";
 
 interface ProductRow extends RowDataPacket {
@@ -863,6 +863,8 @@ export interface Order {
     history: { statusName: string; comment: string; dateAdded: string }[];
     /** Gift vouchers the order sold (not ones it was paid with). */
     vouchersSold: number;
+    /** The coupon's settings, if the order has a coupon that still exists in OpenCart. */
+    coupon: { freeShipping: boolean; limitedToProducts: boolean } | null;
 }
 
 type OrderRow = RowDataPacket & Record<string, string | number | null>;
@@ -965,6 +967,18 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
         `SELECT COUNT(*) AS n FROM \`${dbPrefix}order_voucher\` WHERE order_id = ?`,
         [id],
     );
+    // OpenCart's coupon_history isn't always kept, so the coupon is found by the
+    // code in the order total's title, e.g. "Coupon (black2017)".
+    const couponTotal = totalRows.find((total) => total.code === "coupon");
+    const [couponRows] = couponTotal
+        ? await connection.execute<RowDataPacket[]>(
+              `SELECT c.shipping,
+                  EXISTS (SELECT 1 FROM \`${dbPrefix}coupon_product\` cp WHERE cp.coupon_id = c.coupon_id)
+                  OR EXISTS (SELECT 1 FROM \`${dbPrefix}coupon_category\` cc WHERE cc.coupon_id = c.coupon_id) AS limited
+              FROM \`${dbPrefix}coupon\` c WHERE c.code = ?`,
+              [couponCode(decode(String(couponTotal.title)))],
+          )
+        : [[]];
 
     return {
         id: Number(row.order_id),
@@ -1004,6 +1018,9 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
             dateAdded: history.added_text,
         })),
         vouchersSold: Number(voucherRows[0]?.n ?? 0),
+        coupon: couponRows[0]
+            ? { freeShipping: Number(couponRows[0].shipping) === 1, limitedToProducts: Number(couponRows[0].limited) === 1 }
+            : null,
     };
 }
 

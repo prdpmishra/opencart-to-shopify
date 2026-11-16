@@ -31,6 +31,7 @@ import {
     deleteOrder,
     getOrderEvents,
     findCustomerIdByEmail,
+    findCustomerIdByPhone,
     getProductVariants,
     getShopCurrency,
     getShopifyCustomer,
@@ -219,13 +220,22 @@ async function migrateOrder(connection: Connection, id: number, currency: string
     // Shopify adds the order's addresses to the customer's address book (as its
     // checkout does) and makes the last one the default. The customer's own
     // default is put back afterwards: OpenCart decides which address that is.
-    const existingCustomerId = customerId ?? (input.email ? await findCustomerIdByEmail(input.email) : null);
+    // Without an email, Shopify may match the customer by phone instead: also
+    // looked up, so such a customer isn't taken for one Shopify created.
+    const existingCustomerId =
+        customerId ??
+        (input.email
+            ? await findCustomerIdByEmail(input.email)
+            : input.phone
+              ? await findCustomerIdByPhone(input.phone)
+              : null);
     const existingCustomer = existingCustomerId ? await getShopifyCustomer(existingCustomerId) : null;
     const defaultAddressId = existingCustomer?.defaultAddressId ?? null;
 
     let created = await createOrder(input);
+    saveCreatedCustomer(order.id, created, existingCustomerId);
     saveMapping("order", order.id, created.id);
-    await saveSideEffects(order.id, created, existingCustomerId, existingCustomer);
+    await saveAddedAddresses(order.id, created, existingCustomerId, existingCustomer);
     await checkNoNotification(created);
 
     // Shopify keeps a province code it doesn't know (e.g. any code for the
@@ -252,8 +262,9 @@ async function migrateOrder(connection: Connection, id: number, currency: string
         await deleteOrder(created.id);
         deleteMappingByShopifyId("order", created.id);
         created = await createOrder(input);
+        saveCreatedCustomer(order.id, created, existingCustomerId);
         saveMapping("order", order.id, created.id);
-        await saveSideEffects(order.id, created, existingCustomerId, existingCustomer);
+        await saveAddedAddresses(order.id, created, existingCustomerId, existingCustomer);
         await checkNoNotification(created);
     }
 
@@ -271,21 +282,22 @@ async function migrateOrder(connection: Connection, id: number, currency: string
     return "created";
 }
 
-// Records what Shopify made besides the order, so a rollback can remove it: the
-// customer it creates for a guest order's email, and the addresses it adds to
-// the address book of a customer that already existed.
-async function saveSideEffects(
+// Records what Shopify made besides the order, so a rollback can remove it.
+// The customer it creates for a guest order: saved before the order's mapping,
+// with no call to Shopify in between, so a failure can't leave it unrecorded
+// (a rerun skips a mapped order).
+function saveCreatedCustomer(orderId: number, created: CreatedOrder, existingCustomerId: string | null): void {
+    if (created.customerId && !existingCustomerId) saveOrderSideEffect(created.customerId, created.customerId, orderId);
+}
+
+// The addresses Shopify adds to the address book of a customer that already existed.
+async function saveAddedAddresses(
     orderId: number,
     created: CreatedOrder,
     existingCustomerId: string | null,
     existingCustomer: ShopifyCustomer | null,
 ): Promise<void> {
-    if (!created.customerId) return;
-    if (!existingCustomerId) {
-        saveOrderSideEffect(created.customerId, created.customerId, orderId);
-        return;
-    }
-    if (created.customerId !== existingCustomerId || !existingCustomer) return;
+    if (!existingCustomerId || created.customerId !== existingCustomerId || !existingCustomer) return;
     const before = new Set(existingCustomer.addresses.map((a) => a.id));
     const after = (await getShopifyCustomer(existingCustomerId))?.addresses ?? [];
     for (const address of after)

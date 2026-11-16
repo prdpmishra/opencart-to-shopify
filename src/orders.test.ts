@@ -51,6 +51,7 @@ function order(changes: Partial<Order> = {}): Order {
         ],
         history: [],
         vouchersSold: 0,
+        coupon: null,
         ...changes,
     };
 }
@@ -411,6 +412,124 @@ describe("toOrderInput", () => {
             ).shippingLines;
         assert.equal(withHandling(0).length, 1);
         assert.deepEqual(withHandling(2.5)[1], { title: "Handling", code: "handling", priceSet: money("2.50") });
+    });
+
+    it("refuses a coupon that took off shipping, and one for some products only", () => {
+        // 101 + 5 shipping, the coupon takes off the 5.
+        const freeShipping = order({
+            total: 101,
+            coupon: { freeShipping: true, limitedToProducts: false },
+            totals: [...order().totals.filter((t) => t.code !== "total"),
+                { code: "coupon", title: "Coupon (SHIP)", value: -5 }, { code: "total", title: "Total", value: 101 }],
+        });
+        assert.throws(() => toOrderInput(freeShipping, "USD", [VARIANT], null), /gives free shipping/);
+        // With shipping of 0.00 there was nothing to take off: it's an ordinary coupon.
+        assert.ok(toOrderInput(orderWithCoupon({ coupon: { freeShipping: true, limitedToProducts: false } }), "USD", [VARIANT], null));
+        assert.throws(
+            () => toOrderInput(orderWithCoupon({ coupon: { freeShipping: false, limitedToProducts: true } }), "USD", [VARIANT], null),
+            /only applies to some products/,
+        );
+    });
+
+    it("refuses a coupon bigger than the products' subtotal", () =>
+        assert.throws(
+            () =>
+                toOrderInput(
+                    order({
+                        total: 0,
+                        totals: [
+                            { code: "sub_total", title: "Sub-Total", value: 101 },
+                            { code: "shipping", title: "Flat Shipping Rate", value: 5 },
+                            { code: "coupon", title: "Coupon (X)", value: -106 },
+                            { code: "total", title: "Total", value: 0 },
+                        ],
+                    }),
+                    "USD",
+                    [VARIANT],
+                    null,
+                ),
+            /more than the products cost/,
+        ));
+
+    // 101 with 20.20 VAT, no shipping, but the tax total is 22.20.
+    const withoutShipping = (tax: number) =>
+        order({
+            shipping: null,
+            total: 101 + tax,
+            lines: [line({ tax: 20.2 })],
+            totals: [
+                { code: "sub_total", title: "Sub-Total", value: 101 },
+                { code: "tax", title: "VAT (20%)", value: tax },
+                { code: "total", title: "Total", value: 101 + tax },
+            ],
+        });
+
+    it("refuses tax left over when there's no shipping or fee to put it on", () =>
+        assert.throws(() => toOrderInput(withoutShipping(22.2), "USD", [VARIANT], null), /no shipping or fee/));
+
+    it("puts a rounding cent of tax on the last taxed line", () =>
+        assert.deepEqual(toOrderInput(withoutShipping(20.21), "USD", [VARIANT], null).lineItems[0]!.taxLines?.[0]?.priceSet, money("20.21")));
+
+    it("refuses tax on shipping at a higher rate than the products'", () =>
+        assert.throws(
+            () =>
+                toOrderInput(
+                    orderWithVat({
+                        total: 131.2,
+                        totals: orderWithVat().totals.map((t) =>
+                            t.code === "tax" ? { ...t, value: 25.2 } : t.code === "total" ? { ...t, value: 131.2 } : t,
+                        ),
+                    }),
+                    "USD",
+                    [VARIANT],
+                    null,
+                ),
+            /can't be split/,
+        ));
+
+    it("puts the tax left over on a handling fee when there's no shipping", () => {
+        const input = toOrderInput(
+            order({
+                shipping: null,
+                total: 124.2,
+                lines: [line({ tax: 20.2 })],
+                totals: [
+                    { code: "sub_total", title: "Sub-Total", value: 101 },
+                    { code: "handling", title: "Handling", value: 2.5 },
+                    { code: "tax", title: "VAT (20%)", value: 20.7 },
+                    { code: "total", title: "Total", value: 124.2 },
+                ],
+            }),
+            "USD",
+            [VARIANT],
+            null,
+        );
+        assert.deepEqual(input.shippingLines, [
+            { title: "Handling", code: "handling", priceSet: money("2.50"), taxLines: [{ title: "VAT", rate: 0.2, priceSet: money("0.50") }] },
+        ]);
+    });
+
+    it("refunds each payment of a refunded order with vouchers", () => {
+        const input = toOrderInput(
+            order({
+                statusId: 11,
+                total: 6,
+                totals: [...order().totals.filter((t) => t.code !== "total"),
+                    { code: "voucher", title: "Cadeaubon (A)", value: -60 }, { code: "voucher", title: "Cadeaubon (B)", value: -40 },
+                    { code: "total", title: "Total", value: 6 }],
+            }),
+            "USD",
+            [VARIANT],
+            null,
+        );
+        assert.equal(input.financialStatus, "REFUNDED");
+        assert.deepEqual(
+            input.transactions.map((t) => [t.kind, t.gateway, t.amountSet.shopMoney.amount]),
+            [
+                ["SALE", "Cadeaubon (A)", "60.00"], ["SALE", "Cadeaubon (B)", "40.00"], ["SALE", "iDEAL", "6.00"],
+                ["REFUND", "Cadeaubon (A)", "60.00"], ["REFUND", "Cadeaubon (B)", "40.00"], ["REFUND", "iDEAL", "6.00"],
+            ],
+        );
     });
 
     it("refuses an order that doesn't add up", () =>
