@@ -19,6 +19,7 @@ import {
     findMapping,
     findUnacceptedProvince,
     saveMapping,
+    saveOrderSideEffect,
     saveUnacceptedProvince,
 } from "./mapping.ts";
 import { connect, getOrder, getOrderIds, getStoreCurrency } from "./opencart.ts";
@@ -34,6 +35,7 @@ import {
     getShopifyCustomer,
     setDefaultCustomerAddress,
     type CreatedOrder,
+    type ShopifyCustomer,
 } from "./shopify.ts";
 
 const USAGE =
@@ -201,12 +203,12 @@ async function migrateOrder(connection: Connection, id: number, currency: string
     // checkout does) and makes the last one the default. The customer's own
     // default is put back afterwards: OpenCart decides which address that is.
     const existingCustomerId = customerId ?? (input.email ? await findCustomerIdByEmail(input.email) : null);
-    const defaultAddressId = existingCustomerId
-        ? ((await getShopifyCustomer(existingCustomerId))?.defaultAddressId ?? null)
-        : null;
+    const existingCustomer = existingCustomerId ? await getShopifyCustomer(existingCustomerId) : null;
+    const defaultAddressId = existingCustomer?.defaultAddressId ?? null;
 
     let created = await createOrder(input);
     saveMapping("order", order.id, created.id);
+    await saveSideEffects(order.id, created, existingCustomerId, existingCustomer);
     await checkNoNotification(created);
 
     // Shopify keeps a province code it doesn't know (e.g. any code for the
@@ -234,18 +236,43 @@ async function migrateOrder(connection: Connection, id: number, currency: string
         deleteMappingByShopifyId("order", created.id);
         created = await createOrder(input);
         saveMapping("order", order.id, created.id);
+        await saveSideEffects(order.id, created, existingCustomerId, existingCustomer);
         await checkNoNotification(created);
     }
 
     console.log(`Created Shopify order ${created.name}: ${adminOrderUrl(created.id)}`);
     if (!customerId && created.customerId)
-        console.log(`Guest order, linked by Shopify to the customer with its email: ${adminCustomerUrl(created.customerId)}`);
+        console.log(
+            `Guest order, ${existingCustomerId ? "linked by Shopify to the customer with its email" : "Shopify created a customer for its email"}: ` +
+                adminCustomerUrl(created.customerId),
+        );
 
     if (created.customerId && created.customerId === existingCustomerId && defaultAddressId) {
         const now = (await getShopifyCustomer(created.customerId))?.defaultAddressId;
         if (now !== defaultAddressId) await setDefaultCustomerAddress(created.customerId, defaultAddressId);
     }
     return "created";
+}
+
+// Records what Shopify made besides the order, so a rollback can remove it: the
+// customer it creates for a guest order's email, and the addresses it adds to
+// the address book of a customer that already existed.
+async function saveSideEffects(
+    orderId: number,
+    created: CreatedOrder,
+    existingCustomerId: string | null,
+    existingCustomer: ShopifyCustomer | null,
+): Promise<void> {
+    if (!created.customerId) return;
+    if (!existingCustomerId) {
+        saveOrderSideEffect(created.customerId, created.customerId, orderId);
+        return;
+    }
+    if (created.customerId !== existingCustomerId || !existingCustomer) return;
+    const before = new Set(existingCustomer.addresses.map((a) => a.id));
+    const after = (await getShopifyCustomer(existingCustomerId))?.addresses ?? [];
+    for (const address of after)
+        if (!before.has(address.id)) saveOrderSideEffect(address.id, existingCustomerId, orderId);
 }
 
 // Thrown when Shopify notified someone about a migrated order. It stops --all.

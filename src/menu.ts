@@ -6,6 +6,7 @@
 import type { Connection } from "mysql2/promise";
 import { parseArgs } from "node:util";
 import { prepareCollections, type ProductCollection } from "./collections.ts";
+import { saveStateOnce } from "./mapping.ts";
 import { connect, getMenuCategories, getSeoUrlsEnabled, type Category } from "./opencart.ts";
 import { buildCategoryRedirects, createRedirects } from "./redirects.ts";
 import { getMenu, setMenuItems, type MenuItem } from "./shopify.ts";
@@ -50,7 +51,7 @@ async function main() {
             toItem(category, children.map((child) => toItem(child, []))),
         );
 
-        if (JSON.stringify(menu.items) === JSON.stringify(items)) {
+        if (JSON.stringify(shape(menu.items)) === JSON.stringify(items)) {
             console.log(`${menu.title} is up to date (${describe(items)}).`);
             return;
         }
@@ -62,6 +63,8 @@ async function main() {
             return;
         }
 
+        // The items before the migration, so a rollback can put them back.
+        saveStateOnce(`menu:${menu.handle}`, JSON.stringify(menu.items));
         await setMenuItems(menu, items);
         console.log(`${menu.title} replaced. It had: ${old}. Now ${describe(items)}:`);
         printTree(items);
@@ -71,6 +74,11 @@ async function main() {
     } finally {
         await connection?.end();
     }
+}
+
+// Shopify's items without url and tags, which the items made here don't have.
+function shape(items: MenuItem[]): MenuItem[] {
+    return items.map(({ title, type, resourceId, items }) => ({ title, type, resourceId, items: shape(items) }));
 }
 
 function describe(items: MenuItem[]): string {

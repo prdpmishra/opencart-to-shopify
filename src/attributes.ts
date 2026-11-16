@@ -46,7 +46,7 @@ export async function prepareMetafieldDefinitions(
             // Made by hand in Shopify (or by a run that stopped before saving the mapping).
             if (dryRun) console.log(`${label} would use the existing metafield definition ${existing.id}`);
             else {
-                saveMapping("attribute", metafield.attributeId, existing.id);
+                saveMapping("attribute", metafield.attributeId, existing.id, true);
                 console.log(`${label} uses the existing metafield definition ${existing.id}`);
             }
             result.push(metafield);

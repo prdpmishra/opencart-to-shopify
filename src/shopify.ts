@@ -1016,6 +1016,9 @@ export interface MenuItem {
     type: string;
     /** The linked collection, product, page…; null for plain links. */
     resourceId: string | null;
+    /** Read from Shopify (needed to put back plain links); not sent for new items. */
+    url?: string | null;
+    tags?: string[];
     items: MenuItem[];
 }
 
@@ -1038,14 +1041,20 @@ const MENUS_QUERY = `
                     title
                     type
                     resourceId
+                    url
+                    tags
                     items {
                         title
                         type
                         resourceId
+                        url
+                        tags
                         items {
                             title
                             type
                             resourceId
+                            url
+                            tags
                         }
                     }
                 }

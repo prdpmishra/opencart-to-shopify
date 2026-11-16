@@ -224,7 +224,7 @@ async function createCustomer(
     // The mapping is saved straight after each step, so a failure halfway
     // (e.g. a rejected address) doesn't lose track of what was created.
     const customerId = await setCustomer(input);
-    saveMapping("customer", customer.id, customerId);
+    saveMapping("customer", customer.id, customerId, existingId !== null);
     console.log(`${existingId ? "Linked to the existing" : "Created"} Shopify customer: ${adminCustomerUrl(customerId)}`);
 
     for (const wanted of addresses) {

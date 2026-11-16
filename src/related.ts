@@ -6,7 +6,7 @@
 // Usage: npm run related -- [--dry-run]
 import type { Connection } from "mysql2/promise";
 import { parseArgs } from "node:util";
-import { findMapping } from "./mapping.ts";
+import { findMapping, saveStateOnce } from "./mapping.ts";
 import { connect, getProductIds, getRelatedProducts } from "./opencart.ts";
 import {
     deleteProductMetafields,
@@ -90,6 +90,8 @@ async function main() {
                 console.log(`Would enable Shopify's standard "Related products" metafield definition.`);
             } else {
                 await enableStandardProductMetafieldDefinition(NAMESPACE, KEY);
+                // So a rollback turns it off again (it stays on if it was on before).
+                saveStateOnce("related-definition-enabled", "1");
                 console.log(`Enabled Shopify's standard "Related products" metafield definition.`);
             }
         }
