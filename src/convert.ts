@@ -527,7 +527,7 @@ export interface OrderInput {
     }[];
 }
 
-type FinancialStatus = "PENDING" | "PAID" | "REFUNDED" | "VOIDED" | "EXPIRED";
+type FinancialStatus = "PENDING" | "PARTIALLY_PAID" | "PAID" | "REFUNDED" | "VOIDED" | "EXPIRED";
 
 // OpenCart's default order statuses → Shopify. OpenCart lets shop owners add or
 // rename statuses, so this goes by ID. Canceled, Denied, Failed and the
@@ -709,10 +709,12 @@ export function toOrderInput(
         );
 
     // What was paid: each gift voucher, then the rest with the payment method.
-    const payments = [
-        ...vouchers.map((v) => ({ gateway: v.title, amount: -v.value })),
-        { gateway: order.paymentMethod || "manual", amount: order.total },
-    ].filter((p) => roundCents(p.amount) > 0);
+    const voucherPayments = vouchers
+        .map((v) => ({ gateway: v.title, amount: -v.value }))
+        .filter((p) => roundCents(p.amount) > 0);
+    const payments = [...voucherPayments, { gateway: order.paymentMethod || "manual", amount: order.total }].filter(
+        (p) => roundCents(p.amount) > 0,
+    );
     const transaction = (kind: "SALE" | "REFUND", processedAt: string) => (p: (typeof payments)[number]) => ({
         kind,
         status: "SUCCESS" as const,
@@ -720,12 +722,20 @@ export function toOrderInput(
         amountSet: money(p.amount),
         processedAt,
     });
+    // A voucher was used at checkout, so it has paid even when the rest is still
+    // pending: the order is then partly paid, or paid if the voucher covered it all.
+    const pendingWithVoucher = status.financialStatus === "PENDING" && voucherPayments.length > 0;
+    const financialStatus: FinancialStatus = pendingWithVoucher
+        ? roundCents(order.total) > 0 ? "PARTIALLY_PAID" : "PAID"
+        : status.financialStatus;
     const transactions =
         status.financialStatus === "PAID"
             ? payments.map(transaction("SALE", order.processedAt))
             : status.financialStatus === "REFUNDED"
               ? [...payments.map(transaction("SALE", order.processedAt)), ...payments.map(transaction("REFUND", order.modifiedAt))]
-              : [];
+              : pendingWithVoucher
+                ? voucherPayments.map(transaction("SALE", order.processedAt))
+                : [];
 
     const email = order.email.trim().toLowerCase();
     const phone = toE164(order.telephone, order.payment.countryCode || undefined);
@@ -738,7 +748,7 @@ export function toOrderInput(
         note: orderNote(order, currency),
         tags: ["OpenCart"],
         taxesIncluded: false, // OpenCart prices exclude tax
-        financialStatus: status.financialStatus,
+        financialStatus,
         ...(status.fulfilled && { fulfillmentStatus: "FULFILLED" as const }),
         ...(customerId && { customer: { toAssociate: { id: customerId } } }),
         billingAddress: toAddressInput(order.payment),

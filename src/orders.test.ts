@@ -367,6 +367,36 @@ describe("toOrderInput", () => {
         assert.deepEqual(input.transactions.map((t) => t.gateway), ["Cadeaubon"]);
     });
 
+    it("records the voucher of a pending order, which then is partly paid", () => {
+        const input = toOrderInput(
+            order({
+                total: 6,
+                totals: [...order().totals.filter((t) => t.code !== "total"),
+                    { code: "voucher", title: "Cadeaubon", value: -100 }, { code: "total", title: "Total", value: 6 }],
+            }),
+            "USD",
+            [VARIANT],
+            null,
+        );
+        assert.equal(input.financialStatus, "PARTIALLY_PAID");
+        assert.deepEqual(input.transactions.map((t) => [t.gateway, t.amountSet.shopMoney.amount]), [["Cadeaubon", "100.00"]]);
+    });
+
+    it("makes a pending order paid when a voucher covered all of it", () => {
+        const input = toOrderInput(
+            order({
+                total: 0,
+                totals: [...order().totals.filter((t) => t.code !== "total"),
+                    { code: "voucher", title: "Cadeaubon", value: -106 }, { code: "total", title: "Total", value: 0 }],
+            }),
+            "USD",
+            [VARIANT],
+            null,
+        );
+        assert.equal(input.financialStatus, "PAID");
+        assert.equal(input.transactions.length, 1);
+    });
+
     it("leaves out a handling fee of 0.00 and adds any other one like shipping", () => {
         const withHandling = (value: number) =>
             toOrderInput(
