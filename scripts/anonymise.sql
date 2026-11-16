@@ -132,26 +132,54 @@ UPDATE address SET
     custom_field = '',
     tax_id = '';
 
--- Personal data the migration doesn't read: emptied, so the copy holds none.
-TRUNCATE address_simple_fields;
-TRUNCATE customer_simple_fields;
-TRUNCATE order_simple_fields;
-TRUNCATE order_custom_field;
-TRUNCATE order_fraud;
-TRUNCATE order_shipment;
-TRUNCATE customer_activity;
-TRUNCATE customer_affiliate;
-TRUNCATE customer_approval;
-TRUNCATE customer_ban_ip;
-TRUNCATE customer_history;
-TRUNCATE customer_ip;
-TRUNCATE customer_login;
-TRUNCATE customer_online;
-TRUNCATE customer_search;
-TRUNCATE customer_transaction;
-TRUNCATE `return`;
-TRUNCATE return_history;
-TRUNCATE review;
+-- Gift vouchers: who sent one to whom, and their message.
+UPDATE voucher SET
+    from_name = IF(from_name = '', '', 'Test'),
+    from_email = anon_email(from_email),
+    to_name = IF(to_name = '', '', 'Test'),
+    to_email = anon_email(to_email),
+    message = IF(TRIM(message) = '', '', '[message removed]');
+UPDATE order_voucher SET
+    from_name = IF(from_name = '', '', 'Test'),
+    from_email = anon_email(from_email),
+    to_name = IF(to_name = '', '', 'Test'),
+    to_email = anon_email(to_email),
+    message = IF(TRIM(message) = '', '', '[message removed]');
 
+-- Personal data the migration doesn't read: emptied, so the copy holds none.
+-- Some of these tables only exist with an extension, so missing ones are skipped.
+DROP PROCEDURE IF EXISTS anon_empty;
+DELIMITER //
+CREATE PROCEDURE anon_empty(name VARCHAR(64))
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = name) THEN
+        SET @sql = CONCAT('TRUNCATE `', name, '`');
+        PREPARE statement FROM @sql;
+        EXECUTE statement;
+        DEALLOCATE PREPARE statement;
+    END IF;
+END //
+DELIMITER ;
+CALL anon_empty('address_simple_fields');
+CALL anon_empty('customer_simple_fields');
+CALL anon_empty('order_simple_fields');
+CALL anon_empty('order_custom_field');
+CALL anon_empty('order_fraud');
+CALL anon_empty('order_shipment');
+CALL anon_empty('customer_activity');
+CALL anon_empty('customer_affiliate');
+CALL anon_empty('customer_approval');
+CALL anon_empty('customer_ban_ip');
+CALL anon_empty('customer_history');
+CALL anon_empty('customer_ip');
+CALL anon_empty('customer_login');
+CALL anon_empty('customer_online');
+CALL anon_empty('customer_search');
+CALL anon_empty('customer_transaction');
+CALL anon_empty('return');
+CALL anon_empty('return_history');
+CALL anon_empty('review');
+
+DROP PROCEDURE anon_empty;
 DROP FUNCTION anon_email;
 DROP FUNCTION anon_phone;
