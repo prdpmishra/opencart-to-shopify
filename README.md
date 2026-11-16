@@ -2,7 +2,12 @@
 
 Migrates products, customers and order history from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
-For now it migrates one product at a time with its basic details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, related products, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts. Customers are migrated with their addresses, phone number and newsletter consent (see [Customers](#customers-npm-run-customers)), and orders as history (see [Orders](#orders-npm-run-orders)).
+Products are migrated one at a time or all at once, with their details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, quantity discounts, related products, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts. Customers are migrated with their addresses, phone number and newsletter consent (see [Customers](#customers-npm-run-customers)), and orders as history (see [Orders](#orders-npm-run-orders)). Everything the migration created can be undone with a [rollback](#rollback-npm-run-rollback).
+
+> [!CAUTION]
+> **Test the whole migration on a Shopify development store first, never straight on the live store.** A migration creates thousands of products, customers and orders. Mistakes in the settings (currency, tax, time zone, order statuses) show up only in Shopify, and orders can't be edited afterwards, only deleted. Run every step with `--dry-run` first, then for real on a development store, check the result in the Shopify admin, and roll it back. Use a copy of the OpenCart database with the personal data replaced (see [Testing with a copy of real data](#testing-with-a-copy-of-real-data)), so no real customer details reach the test store. Only then follow [Migrating the real store](#migrating-the-real-store).
+>
+> The tool was written for and tested with OpenCart 3.0 (3.0.2.0 to 3.0.5.0). Extensions that change OpenCart's tables or add their own order totals may need code changes. Data the tool can't migrate correctly makes that product, customer or order fail with an error, or is left out with a warning; read the warnings of the dry runs.
 
 ## Requirements
 
@@ -17,6 +22,10 @@ For now it migrates one product at a time with its basic details, images, varian
   All of them are used: products, files, inventory, locations, publications (sales channels), online store navigation (URL redirects and the main menu), discounts, customers and orders. The app's client ID and secret are used to get an access token through the client credentials grant. After adding a scope to the app, the store has to approve the updated permissions before the token includes it.
 
   Customers also need **protected customer data access**: without it, Shopify answers "This app is not approved to access the Customer object", even with the customer scopes. In the Partner Dashboard, open the app, go to **API access requests → Protected customer data access → Request access**, select **Protected customer data** and then the **Name, Email, Phone and Address** fields, each with a reason, and save. For an app installed only on development stores, that's all: no review or data protection details are needed. (The Dev Dashboard has no page for this.)
+
+  **Optional: `read_all_orders`.** Without it, Shopify hides orders created more than 60 days ago from the app, so a [rollback](#rollback-npm-run-rollback) can only delete the migrated orders within about **55 days** of migrating them (counted from when they were created in Shopify, not the original OpenCart date). After that, the rollback refuses to run rather than leave orders behind. If you may need to roll back later than that, request the scope before migrating: it can't simply be added to the scope list (Shopify answers "Contains invalid scopes: read_all_orders") but has to be requested in the Partner Dashboard under **API access requests → Read all orders scope**. Once granted, add it to the app's scopes and approve the updated permissions in the store.
+
+- MySQL 8 or MariaDB 10.4 or later, only for the anonymising script
 
 ## Setup
 
@@ -199,12 +208,15 @@ Each customer and address is remembered in `migration.sqlite`, saved straight af
 - **Number and date:** Shopify numbers the orders itself (`#1001`, …), as an OpenCart number could clash with Shopify's own. The OpenCart number is in the note. The order date is OpenCart's order date (see `OPENCART_TIMEZONE`).
 - **Money:** the amounts OpenCart stored, in its default currency, which must be the Shopify shop's currency (the run stops otherwise). What the customer paid in their own currency is in the note, e.g. `Paid in EUR: 99.80 EUR`. A line's price is its line total divided by the quantity, as that is what the customer was charged; a warning is printed when that's below the product price.
 - **Lines:** linked to the migrated product's variant with the options the customer chose (select/radio). Other options (text, date, …) become line item properties. A product that isn't in Shopify keeps its name, model (as SKU) and price as a line without a product.
-- **Shipping and tax:** the shipping method with its price. OpenCart prices exclude tax; the tax goes on each line and on shipping (OpenCart doesn't store the shipping tax separately, so it's the order's tax minus the lines' tax), titled as Shopify does (`VAT (20%)` → `VAT` at 20%). Orders with more than one tax, or with totals Shopify orders can't show (coupons, vouchers, reward points, fees), fail with an error.
-- **Status:** OpenCart's default statuses by ID: Pending → payment pending; Processing and Processed → paid; Shipped and Complete → paid and fulfilled; Refunded → paid and refunded (dated at the order's last change); Expired and Voided → the same in Shopify. Canceled, Denied, Failed, Reversed, Chargeback and Canceled Reversal can't be created in Shopify and are skipped with a warning. OpenCart has no refund records, only comments, so a refund is always the full amount, and Shopify's refund record shows the date of the run (its transaction has OpenCart's date).
+- **Shipping and tax:** the shipping method with its price. OpenCart prices exclude tax; the tax goes on each line and on shipping (OpenCart doesn't store the shipping tax separately, so it's the order's tax minus the lines' tax), titled as Shopify does (`VAT (20%)` → `VAT` at 20%). A handling fee becomes a second shipping line, as Shopify has no fees. If the tax can't be split over the lines and shipping exactly, the order fails with an error instead of showing the wrong tax.
+- **Coupons:** a coupon becomes a discount code on the order, with its code and amount, spread over the products as OpenCart did; each line's tax is what OpenCart charged after the coupon. Coupons that also give free shipping, apply only to some products, or are bigger than the products' cost fail with an error, as their tax can't be split correctly. Only the coupon on the order is migrated: the coupons themselves don't become Shopify discount codes.
+- **Gift vouchers:** a voucher used to pay becomes a payment with the voucher's name, next to the payment method for the rest. An order that *sold* a gift voucher is skipped with a warning, as Shopify can't record a gift card sale as history.
+- **Other totals:** reward points, store credit and totals added by extensions fail with an error, as do orders with more than one tax or more than one coupon.
+- **Status:** OpenCart's default statuses by ID: Pending → payment pending (partly paid, or paid, when a gift voucher paid part or all of it); Processing and Processed → paid; Shipped and Complete → paid and fulfilled; Refunded → paid and refunded (dated at the order's last change); Expired and Voided → the same in Shopify. Canceled, Denied, Failed, Reversed, Chargeback and Canceled Reversal can't be created in Shopify and are skipped with a warning. Statuses the shop added itself are migrated like the default status they're mapped to in `OPENCART_ORDER_STATUS_MAP`; unmapped ones are skipped with a warning. OpenCart has no refund records, only comments, so a refund is always the full amount, and Shopify's refund record shows the date of the run (its transaction has OpenCart's date).
 - **Customer:** a registered customer's order is linked to the migrated customer. A guest order keeps its email, and Shopify links it to the customer with that email, creating one if there is none, as it does for its own guest checkouts. Shopify also adds the order's addresses to that customer's addresses and makes the last one the default; the run puts the customer's own default back.
 - **Addresses:** billing and shipping address as for customers. Shopify keeps a province code it doesn't know as plain text (its own orders never have that), e.g. for countries without provinces in Shopify such as the Netherlands and the United Kingdom. When that happens, the code is remembered in `migration.sqlite`, the order is deleted and created again without it, and later orders don't send it. Each of these uses up an order number, so the order numbers have gaps.
 - **Note and tag:** the note has the OpenCart number, date and status, the payment method, the paid currency, the customer's comment and the status history comments. Orders are tagged `OpenCart`.
-- **Not migrated:** OpenCart's order statuses as such, invoice numbers, affiliate and marketing data, IP address and user agent, vouchers and returns. Shopify allows development stores about 5 new orders a minute; the run waits a minute when it reaches that.
+- **Not migrated:** OpenCart's order statuses as such, invoice numbers, affiliate and marketing data, IP address and user agent, gift voucher codes and balances, and returns. Shopify allows development stores about 5 new orders a minute; the run waits a minute when it reaches that, so 1,000 orders take about 3½ hours or more.
 
 ### Related products (`npm run related`)
 
@@ -223,9 +235,51 @@ Only what the migration created is deleted. A customer or metafield definition t
 
 Each item is removed from `migration.sqlite` as soon as it's deleted, items already deleted by hand in Shopify are only removed from it, and the run carries on after a failure. So a rollback that stopped can simply be run again, and afterwards the store can be migrated again from scratch. Shopify demo data and anything added by hand isn't touched. The province codes Shopify didn't accept are kept, as they still apply to a new run.
 
-Rolling back is meant for before going live. After that, new orders link to migrated customers and products, and deleting products takes them off the store.
+The rollback refuses to run (and says why) when it can't be done safely:
+
+- **The migrated orders are more than 55 days old and the app has no `read_all_orders` scope.** Shopify hides them from the app after 60 days, so they would look deleted while staying in the store. Roll back within 55 days, or request the scope (see [Requirements](#requirements)).
+- **`migration.sqlite` was filled by a version of the tool from before the rollback existed.** It can't tell customers and metafield definitions that already existed in Shopify from created ones.
+
+A metafield definition that still has values on products the migration didn't create is kept, with a message; run the rollback again after removing those values. Rolling back is meant for before going live. After that, new orders link to migrated customers and products, and deleting products takes them off the store.
 
 `migration.sqlite` records which products, categories, attributes, description images, redirects, discounts, customers, addresses and orders have been migrated, and what the rollback needs (the main menu before the migration, what already existed in Shopify, and what Shopify made itself for migrated orders), so don't delete it. It always lives in the project folder, whichever folder the script is run from, and is gitignored.
+
+## Testing with a copy of real data
+
+Testing on the shop's real data finds problems that demo data doesn't (odd phone numbers, extension data, custom order statuses), but a development store is no place for real customers' details. [`scripts/anonymise.sql`](scripts/anonymise.sql) replaces them in a **copy** of the OpenCart database:
+
+```sh
+mysql -u root -e "CREATE DATABASE opencart_anon CHARACTER SET utf8mb4"
+mysqldump -u root opencart | mysql -u root opencart_anon
+mysql -u root opencart_anon < scripts/anonymise.sql
+```
+
+It refuses to run on a database whose name doesn't end in `_anon`. Names become `Test Customer 12`, emails `test-…@example.com` (a domain that never receives mail), street addresses `Teststraat 5`, and phone numbers keep their format and first three digits but get other digits. The same email or phone always gets the same fake, so orders still match their customers. Comments, gift voucher messages, passwords, IP addresses and the tables the migration doesn't read (customer activity, logins, reviews, returns, …) are emptied. Countries, provinces, cities and postcodes are kept, so address handling is tested on real data; edit the script if those must go too. The script is written for tables without a prefix: add the prefix to the table names if the copy has one.
+
+Then set `DB_NAME` to the copy. The copy also helps if the test store's currency differs from OpenCart's: change the currency in the copy rather than in the live shop.
+
+Keep a separate `.env` and `migration.sqlite` for each Shopify store: the mapping file belongs to the store it was filled for. Rename or move the file (it's gitignored) before migrating into another store, or the tool will think the products already exist.
+
+## Migrating the real store
+
+After a successful test on a development store:
+
+1. **Back up OpenCart's database and `image` folder.** The migration only reads OpenCart, but keep a copy from the moment of migrating.
+2. **Prepare the Shopify store:** the currency must be OpenCart's default currency; set up the tax rates, shipping, the location for `SHOPIFY_LOCATION_ID`, and "All prices include tax" (with `PRICE_TAX_RATE`). Turn off Shopify Flow, Shopify Email and app automations for new orders and the staff order notifications (see [Orders](#orders-npm-run-orders)), so no one is emailed about historical orders.
+3. **Point `.env` at the live data:** the live OpenCart database (or a fresh copy of it), the `image` folder, `OPENCART_STORE_URL` set to the **live** shop URL (redirects are built from its path), and a new, empty `migration.sqlite`.
+4. **Check everything with `--dry-run`:** `npm run migrate -- --all --dry-run`, `npm run customers -- --all --dry-run` and a sample of orders. Fix or accept every warning and failure before going on.
+5. **Migrate, in this order:** products (`npm run migrate -- --all`), the main menu (`npm run menu`), related products (`npm run related`), customers (`npm run customers -- --all`), then orders (`npm run orders -- --all`). Each command can be rerun after a failure; already migrated items are skipped.
+6. **Check the result** in the Shopify admin: a sample of products, collections, customers and orders against OpenCart. Run `npm run rollback` (without `--yes`) to see the counts of everything created.
+7. **Before switching the domain,** run `npm run migrate -- --all --update` and `npm run customers -- --all --update` to bring over changes made in OpenCart since, and migrate the new orders with `npm run orders -- --all`. Stop taking orders in OpenCart from then on.
+8. **Keep `migration.sqlite`** (and a backup of it). It's what the rollback and every later `--update` work from.
+
+If something is wrong, `npm run rollback -- --yes` removes everything the migration created, as long as the store hasn't gone live and within 55 days of migrating the orders (see [Rollback](#rollback-npm-run-rollback)).
+
+**How long it takes:** a few seconds per product (images are uploaded one by one), a fraction of a second per redirect, and about 5 orders a minute on development stores. A shop with tens of thousands of products takes many hours; runs can be stopped with Ctrl+C and continued later, as migrated items are skipped.
+
+## Not migrated
+
+Shopify has no built-in home for some OpenCart data, so it's left out: product reviews, coupons as discount codes (the coupon on each order is kept), gift voucher codes and balances, customer passwords, reward points and store credit, customer groups' prices other than the default group's, information pages, returns, affiliates, and customer inputs on products (text, date and file options). Each part's section above says what happens to its details.
 
 ## Project structure
 
@@ -248,4 +302,7 @@ src/
   description.ts  Images inside descriptions → Shopify Files
   mapping.ts   SQLite mapping of migrated products, categories, attributes, customers, addresses, orders, files, redirects and discounts
   redirects.ts Old OpenCart URLs → Shopify URL redirects
+  *.test.ts    Unit tests (npm test)
+scripts/
+  anonymise.sql  Replaces personal data in a copy of the OpenCart database
 ```

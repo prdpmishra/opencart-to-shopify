@@ -182,7 +182,8 @@ async function makePlan(): Promise<Plan> {
     if (daysOld > 55 && !(await getAccessScopes()).includes("read_all_orders"))
         blockers.push(
             `The oldest migrated order was created in Shopify ${Math.floor(daysOld)} days ago, and the app has no ` +
-                "read_all_orders scope, so Shopify hides orders older than 60 days from it. Add read_all_orders.",
+                "read_all_orders scope, so Shopify hides orders older than 60 days from it. Request read_all_orders " +
+                "in the Partner Dashboard (API access requests → Read all orders scope), then add it to the app's scopes.",
         );
 
     const savedMenu = findState(`menu:${MENU_HANDLE}`);
