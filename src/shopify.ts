@@ -440,6 +440,23 @@ export async function setAvailableQuantity(
         );
 }
 
+// The access scopes the app has, e.g. "read_all_orders".
+export async function getAccessScopes(): Promise<string[]> {
+    const { currentAppInstallation } = await graphql<{ currentAppInstallation: { accessScopes: { handle: string }[] } }>(
+        "{ currentAppInstallation { accessScopes { handle } } }",
+    );
+    return currentAppInstallation.accessScopes.map((s) => s.handle);
+}
+
+// How many metafields (on any product) a definition has; null if it's gone.
+export async function getMetafieldDefinitionUse(id: string): Promise<number | null> {
+    const { node } = await graphql<{ node: { metafieldsCount: number } | null }>(
+        "query ($id: ID!) { node(id: $id) { ... on MetafieldDefinition { metafieldsCount } } }",
+        { id },
+    );
+    return node ? node.metafieldsCount : null;
+}
+
 // Which of these IDs (products, orders, files, …) still exist in Shopify.
 export async function findExistingIds(ids: string[]): Promise<Set<string>> {
     const existing = new Set<string>();

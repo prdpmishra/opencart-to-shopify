@@ -78,6 +78,14 @@ function getDb(): DatabaseSync {
     const columns = db.prepare("PRAGMA table_info(mapping)").all() as { name: string }[];
     if (!columns.some((c) => c.name === "linked"))
         db.exec("ALTER TABLE mapping ADD COLUMN linked INTEGER NOT NULL DEFAULT 0");
+    // A mapping file started empty with this version records everything a rollback
+    // needs. One from before (with rows already in it) doesn't: its "linked" column
+    // says 0 for customers that already existed, and side effects are missing.
+    const rows = (table: string) => (db!.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+    if (["mapping", "file_mapping", "redirect_mapping", "discount_mapping"].every((t) => rows(t) === 0))
+        db.prepare("INSERT OR IGNORE INTO saved_state (key, value) VALUES ('recording-since', ?)").run(
+            new Date().toISOString(),
+        );
     return db;
 }
 
@@ -269,4 +277,13 @@ export function forgetShopifyId(shopifyId: string): void {
 
 export function forgetState(key: string): void {
     getDb().prepare("DELETE FROM saved_state WHERE key = ?").run(key);
+}
+
+// When order mappings were made: Shopify only shows apps orders of the last 60
+// days unless they have the read_all_orders scope.
+export function oldestMigratedAt(entityType: EntityType): string | undefined {
+    const row = getDb()
+        .prepare("SELECT MIN(migrated_at) AS oldest FROM mapping WHERE entity_type = ?")
+        .get(entityType) as { oldest: string | null };
+    return row.oldest ?? undefined;
 }

@@ -6,7 +6,7 @@
 import type { Connection } from "mysql2/promise";
 import { parseArgs } from "node:util";
 import { prepareCollections, type ProductCollection } from "./collections.ts";
-import { saveStateOnce } from "./mapping.ts";
+import { findState, isMappedShopifyId, saveStateOnce } from "./mapping.ts";
 import { connect, getMenuCategories, getSeoUrlsEnabled, type Category } from "./opencart.ts";
 import { buildCategoryRedirects, createRedirects } from "./redirects.ts";
 import { getMenu, setMenuItems, type MenuItem } from "./shopify.ts";
@@ -63,8 +63,17 @@ async function main() {
             return;
         }
 
-        // The items before the migration, so a rollback can put them back.
-        saveStateOnce(`menu:${menu.handle}`, JSON.stringify(menu.items));
+        // The items before the migration, so a rollback can put them back. A menu that
+        // already links to migrated collections was built by an earlier run (from before
+        // this was saved), so it isn't what the shop had before the migration.
+        const linksMigrated = (list: MenuItem[]): boolean =>
+            list.some((item) => (item.resourceId && isMappedShopifyId("category", item.resourceId)) || linksMigrated(item.items));
+        if (!linksMigrated(menu.items)) saveStateOnce(`menu:${menu.handle}`, JSON.stringify(menu.items));
+        else if (!findState(`menu:${menu.handle}`))
+            console.warn(
+                `Warning: ${menu.title} already links to migrated collections, so it isn't saved as the menu from ` +
+                    "before the migration; a rollback leaves the menu as it is.",
+            );
         await setMenuItems(menu, items);
         console.log(`${menu.title} replaced. It had: ${old}. Now ${describe(items)}:`);
         printTree(items);

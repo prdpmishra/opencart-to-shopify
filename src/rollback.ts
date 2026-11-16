@@ -15,6 +15,7 @@ import {
     listOrderSideEffectCustomers,
     listMappings,
     listShopifyIds,
+    oldestMigratedAt,
 } from "./mapping.ts";
 import {
     adminCustomerUrl,
@@ -22,7 +23,9 @@ import {
     deleteCustomerAddress,
     findExistingIds,
     findProductMetafieldDefinition,
+    getAccessScopes,
     getCustomerOrdersAndAddresses,
+    getMetafieldDefinitionUse,
     getMenu,
     getShopifyCustomer,
     setMenuItems,
@@ -53,13 +56,23 @@ interface Plan {
     linkedDefinitions: string[];
     // Set when the migration enabled the related products definition.
     relatedDefinitionId: string | null;
+    // Why rolling back would be unsafe; --yes refuses while there are any.
+    blockers: string[];
 }
 
 async function main() {
     try {
         const args = parseArgs({ options: { yes: { type: "boolean", default: false } } });
         const plan = await makePlan();
-        printPlan(plan, args.values.yes);
+        printPlan(plan, args.values.yes && plan.blockers.length === 0);
+        if (plan.blockers.length > 0) {
+            console.error(`\nRolling back isn't safe:\n${plan.blockers.map((b) => `  - ${b}`).join("\n")}`);
+            if (args.values.yes) {
+                console.error("Nothing was changed.");
+                process.exitCode = 1;
+            }
+            return;
+        }
         if (!args.values.yes) return;
 
         const failed = await rollBack(plan);
@@ -119,7 +132,11 @@ async function makePlan(): Promise<Plan> {
     const keptCustomers: Plan["keptCustomers"] = [];
     for (const id of customers.ids) {
         const customer = await getCustomerOrdersAndAddresses(id);
-        if (!customer) continue;
+        // Deleted in Shopify just now: only removed from the mapping.
+        if (!customer) {
+            customers.gone.push(id);
+            continue;
+        }
         const others = customer.orderIds.filter((orderId) => !migratedOrders.has(orderId)).length;
         if (others > 0 || customer.totalOrders > customer.orderIds.length)
             keptCustomers.push({
@@ -151,6 +168,23 @@ async function makePlan(): Promise<Plan> {
         linkedCustomers.push({ id, addressIds });
     }
 
+    const blockers: string[] = [];
+    if (!findState("recording-since"))
+        blockers.push(
+            "migration.sqlite was started before the migration recorded what a rollback needs. It can't tell " +
+                "customers and metafield definitions that already existed in Shopify from created ones, so those " +
+                "could be deleted. Roll back by hand, or migrate again into a fresh mapping file.",
+        );
+    // Without read_all_orders Shopify hides orders created more than 60 days ago:
+    // they'd look deleted and only be removed from the mapping.
+    const oldestOrder = oldestMigratedAt("order");
+    const daysOld = oldestOrder ? (Date.now() - Date.parse(`${oldestOrder.replace(" ", "T")}Z`)) / 86_400_000 : 0;
+    if (daysOld > 55 && !(await getAccessScopes()).includes("read_all_orders"))
+        blockers.push(
+            `The oldest migrated order was created in Shopify ${Math.floor(daysOld)} days ago, and the app has no ` +
+                "read_all_orders scope, so Shopify hides orders older than 60 days from it. Add read_all_orders.",
+        );
+
     const savedMenu = findState(`menu:${MENU_HANDLE}`);
     return {
         savedMenu: savedMenu ? (JSON.parse(savedMenu) as MenuItem[]) : null,
@@ -160,6 +194,7 @@ async function makePlan(): Promise<Plan> {
         linkedCustomers,
         linkedDefinitions: ids("attribute", true),
         relatedDefinitionId: relatedDefinition?.id ?? null,
+        blockers,
     };
 }
 
@@ -198,7 +233,7 @@ function printPlan(plan: Plan, yes: boolean): void {
                 "(their values on migrated products go with the products).",
         );
 
-    if (!yes) console.log('\nTo roll back, run "npm run rollback -- --yes".');
+    if (!yes && plan.blockers.length === 0) console.log('\nTo roll back, run "npm run rollback -- --yes".');
 }
 
 // Rolls back in the order of the plan, carrying on after a failure. Returns the number of failures.
@@ -233,6 +268,17 @@ async function rollBack(plan: Plan): Promise<number> {
         let deleted = 0;
         for (const id of group.ids) {
             const ok = await attempt(`to delete ${id}`, async () => {
+                // The migrated products are gone by now, so values left on a definition are
+                // on products made in Shopify, which deleting it would wipe. (Shopify may
+                // also still be clearing the deleted products' values: a rerun retries.)
+                if (group.title === "Metafield definitions") {
+                    const used = await getMetafieldDefinitionUse(id);
+                    if (used)
+                        throw new Error(
+                            `it still has values on ${used} product(s) that weren't migrated. Delete it by hand if ` +
+                                "they don't need it, or run the rollback again if that count goes down to 0.",
+                        );
+                }
                 await deleteById(id);
                 forgetShopifyId(id);
                 if (id === plan.relatedDefinitionId) forgetState("related-definition-enabled");
