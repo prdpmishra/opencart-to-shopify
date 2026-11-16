@@ -198,17 +198,21 @@ async function migrateProduct(
     let { special } = rules;
     for (const rule of notMigrated)
         console.warn(`Warning: product ${id}: ${rule} is not migrated.`);
+    // A special running for decades is how the shop sets its real price (import
+    // tools do this), not a sale: it becomes the price, without a compare-at price.
+    const permanent = special?.endDate ? isPermanentSpecial(special.endDate) : false;
     // In OpenCart's cart an active special replaces the quantity discount price,
     // so the tiers have no effect. In Shopify they'd come off the special price.
     if (special && discounts.length > 0)
         console.warn(
-            `Warning: product ${id}: its quantity discounts are not migrated while the special price is active, ` +
-                "because OpenCart ignores them then. Run --update after the special ends.",
+            permanent
+                ? `Warning: product ${id}: its quantity discounts are not migrated, because OpenCart ignores them ` +
+                      `while its special price applies (until ${special.endDate}).`
+                : `Warning: product ${id}: its quantity discounts are not migrated while the special price is active, ` +
+                      "because OpenCart ignores them then. Run --update after the special ends.",
         );
     const tiers = special ? [] : discounts;
-    // A special running for decades is how the shop sets its real price (import
-    // tools do this), not a sale: it becomes the price, without a compare-at price.
-    if (special?.endDate && isPermanentSpecial(special.endDate)) {
+    if (special && permanent) {
         console.log(
             `Product ${id}: special price ${special.price} runs until ${special.endDate}, so it's used as the price ` +
                 `(OpenCart price ${product.price} is left out).`,
