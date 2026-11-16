@@ -859,6 +859,34 @@ export interface Order {
 
 type OrderRow = RowDataPacket & Record<string, string | number | null>;
 
+// The names of OpenCart's default order statuses, for a status whose name is
+// missing (shops delete or rename them, and some have no name in every language).
+const DEFAULT_ORDER_STATUS_NAMES: Record<number, string> = {
+    1: "Pending",
+    2: "Processing",
+    3: "Shipped",
+    5: "Complete",
+    7: "Canceled",
+    8: "Denied",
+    9: "Canceled Reversal",
+    10: "Failed",
+    11: "Refunded",
+    12: "Reversed",
+    13: "Chargeback",
+    14: "Expired",
+    15: "Processed",
+    16: "Voided",
+};
+
+function orderStatusName(id: number, name: string | null): string {
+    return decode(name ?? "") || DEFAULT_ORDER_STATUS_NAMES[id] || `#${id}`;
+}
+
+// The status name in LANGUAGE_ID, else in any other language.
+const statusNameSql = (prefix: string, column: string) =>
+    `COALESCE(os.name, (SELECT x.name FROM \`${prefix}order_status\` x
+        WHERE x.order_status_id = ${column} ORDER BY x.language_id LIMIT 1))`;
+
 // The address fields of an order row, for prefix "payment" or "shipping".
 function orderAddress(row: OrderRow, prefix: string): OrderAddress {
     const text = (field: string) => decode(String(row[`${prefix}_${field}`] ?? ""));
@@ -884,7 +912,7 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
     // as OpenCart shows them, and converted with OPENCART_TIMEZONE.
     const timeZone = requireEnv("OPENCART_TIMEZONE");
     const [rows] = await connection.execute<OrderRow[]>(
-        `SELECT o.*, os.name AS status_name,
+        `SELECT o.*, ${statusNameSql(dbPrefix, "o.order_status_id")} AS status_name,
             pc.iso_code_2 AS payment_iso_code_2, pz.code AS payment_zone_code,
             sc.iso_code_2 AS shipping_iso_code_2, sz.code AS shipping_zone_code,
             DATE_FORMAT(o.date_added, '%Y-%m-%d %H:%i:%s') AS added_text,
@@ -917,7 +945,7 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
         [id],
     );
     const [historyRows] = await connection.execute<RowDataPacket[]>(
-        `SELECT os.name AS status_name, oh.comment, DATE_FORMAT(oh.date_added, '%Y-%m-%d %H:%i') AS added_text
+        `SELECT oh.order_status_id, ${statusNameSql(dbPrefix, "oh.order_status_id")} AS status_name, oh.comment, DATE_FORMAT(oh.date_added, '%Y-%m-%d %H:%i') AS added_text
         FROM \`${dbPrefix}order_history\` oh
         LEFT JOIN \`${dbPrefix}order_status\` os
             ON os.order_status_id = oh.order_status_id AND os.language_id = ?
@@ -932,7 +960,7 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
         email: String(row.email),
         telephone: String(row.telephone),
         statusId: Number(row.order_status_id),
-        statusName: decode(String(row.status_name ?? "")),
+        statusName: orderStatusName(Number(row.order_status_id), row.status_name as string | null),
         currencyCode: String(row.currency_code),
         currencyValue: Number(row.currency_value),
         total: Number(row.total),
@@ -959,7 +987,7 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
         })),
         totals: totalRows.map((total) => ({ code: total.code, title: decode(total.title), value: Number(total.value) })),
         history: historyRows.map((history) => ({
-            statusName: decode(history.status_name ?? ""),
+            statusName: orderStatusName(history.order_status_id, history.status_name),
             comment: decode(history.comment),
             dateAdded: history.added_text,
         })),

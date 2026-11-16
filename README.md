@@ -58,6 +58,7 @@ PRICE_TAX_RATE=
 | `OPENCART_STORE_URL` | Yes, for `migrate` | OpenCart's store URL (`HTTP_SERVER` in its `config.php`). Only its path is used for redirects: set it to the live shop's URL before the real migration. |
 | `OPENCART_IMAGE_URL` | Yes, for `migrate` | The URL of that folder as used in descriptions, e.g. `http://localhost/opencart/image/` |
 | `OPENCART_TIMEZONE` | Yes | PHP's time zone on the OpenCart server (`date.timezone` in `php.ini`), e.g. `Europe/Berlin`. OpenCart sets MySQL's time zone to PHP's, so its dates are in this zone, not MySQL's own; the migration does the same, so specials and availability dates are checked as OpenCart checks them, and order and discount dates reach Shopify at the right moment. |
+| `OPENCART_ORDER_STATUS_MAP` | No | The shop's own order statuses, each migrated like one of OpenCart's default statuses, as `own ID:default ID` pairs: `20:5,22:1` migrates status 20 like Complete (5) and 22 like Pending (1). Orders with an own status that isn't listed are skipped with a warning. |
 | `SHOPIFY_SHOP` | Yes | `my-store` or `my-store.myshopify.com` |
 | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | Yes | From the Shopify app's settings |
 | `SHOPIFY_API_VERSION` | Yes | Admin API version, e.g. `2026-10` |

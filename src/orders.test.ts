@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { canMigrateOrderStatus, isNotificationEvent, matchVariant, toOrderInput, utcOffset, zonedTimeToUtc } from "./convert.ts";
+import { canMigrateOrderStatus, isNotificationEvent, matchVariant, parseOrderStatusMap, toOrderInput, utcOffset, zonedTimeToUtc } from "./convert.ts";
 import type { Order, OrderAddress, OrderLine } from "./opencart.ts";
 
 function address(changes: Partial<OrderAddress> = {}): OrderAddress {
@@ -102,6 +102,15 @@ describe("canMigrateOrderStatus", () => {
         assert.ok([1, 2, 3, 5, 11, 14, 15, 16].every(canMigrateOrderStatus)));
     it("skips missing, canceled, denied and failed orders", () =>
         assert.ok(![0, 7, 8, 9, 10, 12, 13].some(canMigrateOrderStatus)));
+});
+
+describe("parseOrderStatusMap", () => {
+    it("reads own status → default status pairs", () =>
+        assert.deepEqual([...parseOrderStatusMap(" 20:5, 22:1 ")], [[20, 5], [22, 1]]));
+    it("is empty when not set", () => assert.equal(parseOrderStatusMap(undefined).size, 0));
+    it("refuses a pair in another format", () => assert.throws(() => parseOrderStatusMap("20=5"), /isn't "own status ID/));
+    it("refuses mapping to a status that can't be migrated", () =>
+        assert.throws(() => parseOrderStatusMap("20:7"), /isn't a default status that can be migrated/));
 });
 
 describe("matchVariant", () => {

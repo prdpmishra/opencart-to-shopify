@@ -6,6 +6,7 @@ import type { Connection } from "mysql2/promise";
 import { parseArgs } from "node:util";
 import {
     canMigrateOrderStatus,
+    parseOrderStatusMap,
     describeAddress,
     isNotificationEvent,
     matchVariant,
@@ -85,6 +86,7 @@ async function main() {
                 `OpenCart's default currency is ${storeCurrency}, but the Shopify shop's currency is ${currency}. ` +
                     "Orders can only be migrated when they are the same.",
             );
+        ownStatuses = parseOrderStatusMap(process.env.OPENCART_ORDER_STATUS_MAP);
 
         if (!all) {
             await migrateOrder(connection, id, currency, dryRun);
@@ -129,6 +131,9 @@ async function main() {
     }
 }
 
+// The shop's own order statuses → the default status they're migrated like (OPENCART_ORDER_STATUS_MAP).
+let ownStatuses = new Map<number, number>();
+
 // Migrates one order, or skips it. Errors are thrown to the caller.
 async function migrateOrder(connection: Connection, id: number, currency: string, dryRun: boolean): Promise<Result> {
     const existing = findMapping("order", id);
@@ -139,15 +144,20 @@ async function migrateOrder(connection: Connection, id: number, currency: string
 
     const order = await getOrder(connection, id);
     console.log(
-        `OpenCart order ${id}: ${order.dateAdded}, ${order.statusName || "no status"}, ` +
+        `OpenCart order ${id}: ${order.dateAdded}, ${order.statusName}, ` +
             `${order.total.toFixed(2)} ${currency}, ${order.email}`,
     );
     if (order.statusId === 0) {
         console.warn("Warning: this is a \"missing order\" (the checkout was never completed), skipping it.");
         return "skipped";
     }
+    // The name stays the shop's own (for the note); only how it's migrated changes.
+    order.statusId = ownStatuses.get(order.statusId) ?? order.statusId;
     if (!canMigrateOrderStatus(order.statusId)) {
-        console.warn(`Warning: orders with the status "${order.statusName}" aren't migrated, skipping it.`);
+        console.warn(
+            `Warning: orders with the status "${order.statusName}" aren't migrated, skipping it. ` +
+                "If it's one of the shop's own statuses, add it to OPENCART_ORDER_STATUS_MAP.",
+        );
         return "skipped";
     }
 

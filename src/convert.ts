@@ -535,6 +535,26 @@ export function canMigrateOrderStatus(statusId: number): boolean {
     return statusId in ORDER_STATUSES;
 }
 
+// The shop's own order statuses, from OPENCART_ORDER_STATUS_MAP: "20:5,22:1"
+// means status 20 is migrated like OpenCart's default status 5 (Complete), and
+// 22 like 1 (Pending). Returns own status ID → default status ID.
+export function parseOrderStatusMap(value: string | undefined): Map<number, number> {
+    const map = new Map<number, number>();
+    for (const pair of (value ?? "").split(",").map((p) => p.trim()).filter(Boolean)) {
+        const match = /^(\d+):(\d+)$/.exec(pair);
+        if (!match)
+            throw new Error(`OPENCART_ORDER_STATUS_MAP: "${pair}" isn't "own status ID:default status ID", e.g. "20:5".`);
+        const [own, standard] = [Number(match[1]), Number(match[2])];
+        if (!canMigrateOrderStatus(standard))
+            throw new Error(
+                `OPENCART_ORDER_STATUS_MAP: status ${standard} isn't a default status that can be migrated ` +
+                    `(${Object.keys(ORDER_STATUSES).join(", ")}).`,
+            );
+        map.set(own, standard);
+    }
+    return map;
+}
+
 // Select and radio options are the ones migrated products have as variants.
 const isVariantOption = (option: OrderLine["options"][number]) =>
     option.type === "select" || option.type === "radio";
