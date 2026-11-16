@@ -226,3 +226,33 @@ export function saveOrderSideEffect(shopifyId: string, customerId: string, order
 export function saveStateOnce(key: string, value: string): void {
     getDb().prepare("INSERT OR IGNORE INTO saved_state (key, value) VALUES (?, ?)").run(key, value);
 }
+
+export function findState(key: string): string | undefined {
+    const row = getDb().prepare("SELECT value FROM saved_state WHERE key = ?").get(key) as
+        | { value: string }
+        | undefined;
+    return row?.value;
+}
+
+// For the rollback: everything the migration recorded.
+export function listMappings(entityType: EntityType): Mapping[] {
+    return getDb()
+        .prepare("SELECT * FROM mapping WHERE entity_type = ? ORDER BY opencart_id")
+        .all(entityType) as unknown as Mapping[];
+}
+
+// The Shopify IDs in one of the other tables (files, redirects, discounts, order side effects).
+export function listShopifyIds(
+    table: "file_mapping" | "redirect_mapping" | "discount_mapping" | "order_side_effect",
+): string[] {
+    const rows = getDb().prepare(`SELECT shopify_id FROM ${table}`).all() as { shopify_id: string }[];
+    return rows.map((row) => row.shopify_id);
+}
+
+// The customers Shopify created for guest orders (side effects whose customer is themselves).
+export function listGuestOrderCustomers(): string[] {
+    const rows = getDb()
+        .prepare("SELECT shopify_id FROM order_side_effect WHERE shopify_id = customer_id")
+        .all() as { shopify_id: string }[];
+    return rows.map((row) => row.shopify_id);
+}

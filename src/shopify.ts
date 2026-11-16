@@ -440,6 +440,19 @@ export async function setAvailableQuantity(
         );
 }
 
+// Which of these IDs (products, orders, files, …) still exist in Shopify.
+export async function findExistingIds(ids: string[]): Promise<Set<string>> {
+    const existing = new Set<string>();
+    for (let i = 0; i < ids.length; i += 250) {
+        const { nodes } = await graphql<{ nodes: ({ id: string } | null)[] }>(
+            "query ($ids: [ID!]!) { nodes(ids: $ids) { id } }",
+            { ids: ids.slice(i, i + 250) },
+        );
+        for (const node of nodes) if (node) existing.add(node.id);
+    }
+    return existing;
+}
+
 // Shopify's store setting "All prices include tax".
 export async function getShopTaxesIncluded(): Promise<boolean> {
     const { shop } = await graphql<{ shop: { taxesIncluded: boolean } }>(
@@ -1382,6 +1395,15 @@ export async function getShopifyCustomer(id: string): Promise<ShopifyCustomer | 
         defaultAddressId: customer.defaultAddress?.id ?? null,
         addresses: customer.addressesV2.nodes,
     };
+}
+
+// The customer's order IDs (up to 250) and how many orders they have in all; null if the customer is gone.
+export async function getCustomerOrderIds(id: string): Promise<{ total: number; ids: string[] } | null> {
+    const { customer } = await graphql<{
+        customer: { numberOfOrders: string; orders: { nodes: { id: string }[] } } | null;
+    }>(`query ($id: ID!) { customer(id: $id) { numberOfOrders orders(first: 250) { nodes { id } } } }`, { id });
+    if (!customer) return null;
+    return { total: Number(customer.numberOfOrders), ids: customer.orders.nodes.map((o) => o.id) };
 }
 
 // What Shopify saved; the province code shows whether Shopify kept the one we sent.

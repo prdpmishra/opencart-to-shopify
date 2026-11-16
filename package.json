@@ -12,7 +12,8 @@
         "customers": "tsx --env-file=.env src/customers.ts",
         "typecheck": "tsc --noEmit",
         "orders": "tsx --env-file=.env src/orders.ts",
-        "related": "tsx --env-file=.env src/related.ts"
+        "related": "tsx --env-file=.env src/related.ts",
+        "rollback": "tsx --env-file=.env src/rollback.ts"
     },
     "keywords": [],
     "author": "",
