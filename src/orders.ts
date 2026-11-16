@@ -160,6 +160,13 @@ async function migrateOrder(connection: Connection, id: number, currency: string
         );
         return "skipped";
     }
+    // Shopify can't create an order that sold a gift card, and a voucher isn't a product.
+    if (order.vouchersSold > 0) {
+        console.warn(
+            `Warning: this order sold ${order.vouchersSold} gift voucher(s), which Shopify can't record as order history, skipping it.`,
+        );
+        return "skipped";
+    }
 
     // A registered customer's order goes to the migrated Shopify customer. For a
     // guest order, Shopify links the customer with the order's email itself,
@@ -332,6 +339,8 @@ function printOrder(input: OrderInput, customerId: string | null): void {
     }
     for (const line of input.shippingLines)
         console.log(`  Shipping: ${line.title} (${line.code}) ${amount(line.priceSet)}${taxes(line.taxLines)}`);
+    const discount = input.discountCode?.itemFixedDiscountCode;
+    if (discount) console.log(`  Discount: code ${discount.code}, ${amount(discount.amountSet)} off`);
     for (const t of input.transactions)
         console.log(`  Payment:  ${t.kind} ${amount(t.amountSet)} ${input.currency} via ${t.gateway} at ${t.processedAt}`);
     if (input.transactions.length === 0) console.log("  Payment:  (no transaction)");

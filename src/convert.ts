@@ -588,9 +588,9 @@ export function isNotificationEvent(event: { action: string | null; message: str
     return /mail|sms|notif/i.test(event.action ?? "") || /\b(e-?mail|sms|text message|notification)\b/i.test(event.message);
 }
 
-// "VAT (20%)" → "VAT": Shopify shows the rate next to the title itself.
+// "VAT (20%)" or "BTW 21%" → "VAT", "BTW": Shopify shows the rate next to the title itself.
 function taxTitle(title: string): string {
-    return title.replace(/\s*\(\s*[\d.,]+\s*%\s*\)\s*$/, "").trim() || title;
+    return title.replace(/\s*\(?\s*[\d.,]+\s*%\s*\)?\s*$/, "").trim() || title;
 }
 
 // Turns an OpenCart order into Shopify's orderCreate input. Amounts stay in the

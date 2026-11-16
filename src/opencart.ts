@@ -855,6 +855,8 @@ export interface Order {
     totals: { code: string; title: string; value: number }[];
     /** Status changes that have a comment. */
     history: { statusName: string; comment: string; dateAdded: string }[];
+    /** Gift vouchers the order sold (not ones it was paid with). */
+    vouchersSold: number;
 }
 
 type OrderRow = RowDataPacket & Record<string, string | number | null>;
@@ -953,6 +955,10 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
         ORDER BY oh.date_added, oh.order_history_id`,
         [languageId, id],
     );
+    const [voucherRows] = await connection.execute<RowDataPacket[]>(
+        `SELECT COUNT(*) AS n FROM \`${dbPrefix}order_voucher\` WHERE order_id = ?`,
+        [id],
+    );
 
     return {
         id: Number(row.order_id),
@@ -991,6 +997,7 @@ export async function getOrder(connection: Connection, id: number): Promise<Orde
             comment: decode(history.comment),
             dateAdded: history.added_text,
         })),
+        vouchersSold: Number(voucherRows[0]?.n ?? 0),
     };
 }
 

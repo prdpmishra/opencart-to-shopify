@@ -50,6 +50,7 @@ function order(changes: Partial<Order> = {}): Order {
             { code: "total", title: "Total", value: 106 },
         ],
         history: [],
+        vouchersSold: 0,
         ...changes,
     };
 }
@@ -311,6 +312,11 @@ describe("toOrderInput", () => {
         const input = toOrderInput(orderWithCoupon(), "USD", [VARIANT], null);
         assert.deepEqual(input.lineItems[0]!.taxLines, [{ title: "BTW", rate: 0.21, priceSet: money("156.04") }]);
         assert.equal(input.shippingLines[0]!.taxLines, undefined);
+    });
+
+    it("leaves a rate without brackets out of the tax title", () => {
+        const totals = orderWithCoupon().totals.map((t) => (t.code === "tax" ? { ...t, title: "BTW 21%" } : t));
+        assert.equal(toOrderInput(orderWithCoupon({ totals }), "USD", [VARIANT], null).lineItems[0]!.taxLines?.[0]?.title, "BTW");
     });
 
     it("uses the coupon's title when it has no code in brackets", () =>
