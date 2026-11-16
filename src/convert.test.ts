@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
     buildHandle,
     cleanDescription,
+    isPermanentSpecial,
     roundCents,
     sameAddress,
     sameHtml,
@@ -72,6 +73,16 @@ describe("buildHandle", () => {
     it("falls back to the name", () => assert.equal(buildHandle({ id: 1, name: "iPod Nano", seoKeyword: null }), "ipod-nano"));
     it("falls back to kind and id", () =>
         assert.equal(buildHandle({ id: 7, name: "!!!", seoKeyword: null }, "category"), "category-7"));
+});
+
+describe("isPermanentSpecial", () => {
+    const now = new Date("2026-11-16T12:00:00Z");
+    it("treats a special ending decades from now as the price", () => assert.ok(isPermanentSpecial("2049-04-03", now)));
+    it("treats a special ending within 10 years as a sale", () => assert.ok(!isPermanentSpecial("2027-01-31", now)));
+    it("draws the line at 10 years", () => {
+        assert.ok(!isPermanentSpecial("2036-11-16", now));
+        assert.ok(isPermanentSpecial("2036-11-17", now));
+    });
 });
 
 describe("roundCents", () => {

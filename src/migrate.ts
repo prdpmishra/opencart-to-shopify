@@ -19,6 +19,7 @@ import {
     sameHtml,
     shopifyWeightUnit,
     toMetafields,
+    isPermanentSpecial,
     toProductSetInput,
     type ProductMetafield,
     type ProductSetInput,
@@ -192,7 +193,9 @@ async function migrateProduct(
                 (option.required ? " It is required in OpenCart, but Shopify customers won't be asked for it." : ""),
         );
 
-    const { special, discounts, notMigrated } = await getPriceRules(connection, id);
+    const rules = await getPriceRules(connection, id);
+    const { discounts, notMigrated } = rules;
+    let { special } = rules;
     for (const rule of notMigrated)
         console.warn(`Warning: product ${id}: ${rule} is not migrated.`);
     // In OpenCart's cart an active special replaces the quantity discount price,
@@ -203,6 +206,16 @@ async function migrateProduct(
                 "because OpenCart ignores them then. Run --update after the special ends.",
         );
     const tiers = special ? [] : discounts;
+    // A special running for decades is how the shop sets its real price (import
+    // tools do this), not a sale: it becomes the price, without a compare-at price.
+    if (special?.endDate && isPermanentSpecial(special.endDate)) {
+        console.log(
+            `Product ${id}: special price ${special.price} runs until ${special.endDate}, so it's used as the price ` +
+                `(OpenCart price ${product.price} is left out).`,
+        );
+        product.price = String(special.price);
+        special = null;
+    }
     if (special?.endDate)
         console.warn(
             `Warning: product ${id}: the special price ends on ${special.endDate} in OpenCart, ` +

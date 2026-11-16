@@ -66,6 +66,14 @@ export function tidyText(text: string): string {
     return text.replace(/\s+/g, " ").trim();
 }
 
+// Whether a special price ending on this date ("2049-04-03") is really the
+// product's price: it ends more than 10 years from now.
+export function isPermanentSpecial(endDate: string, now = new Date()): boolean {
+    const limit = new Date(now);
+    limit.setFullYear(limit.getFullYear() + 10);
+    return new Date(`${endDate}T00:00:00Z`) > limit;
+}
+
 // Rounds to whole cents. Math.round on cents avoids results like 1.005 → 1.00,
 // which toFixed(2) gives because 1.005 is stored as 1.00499999...
 export function roundCents(amount: number): number {
