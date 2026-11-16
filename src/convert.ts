@@ -1,5 +1,5 @@
 import { decode } from "he";
-import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js";
+import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js/max";
 import type {
     Attribute,
     Customer,
