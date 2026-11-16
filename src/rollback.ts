@@ -2,20 +2,30 @@
 // puts back what it replaced (the main menu). What already existed in Shopify
 // before the migration is kept; only what the migration added to it is removed.
 //
-// Usage: npm run rollback    (shows what a rollback would do; nothing is changed)
+// Usage: npm run rollback          (shows what a rollback would do; nothing is changed)
+//        npm run rollback -- --yes (rolls back)
+//
+// Each item is removed from the mapping as soon as it's deleted, so a rollback
+// that stopped halfway can simply be run again.
 import { parseArgs } from "node:util";
 import {
     findState,
+    forgetShopifyId,
+    forgetState,
     listGuestOrderCustomers,
     listMappings,
     listShopifyIds,
 } from "./mapping.ts";
 import {
     adminCustomerUrl,
+    deleteById,
+    deleteCustomerAddress,
     findExistingIds,
     findProductMetafieldDefinition,
-    getCustomerOrderIds,
+    getCustomerOrdersAndAddresses,
+    getMenu,
     getShopifyCustomer,
+    setMenuItems,
     type MenuItem,
 } from "./shopify.ts";
 
@@ -34,17 +44,32 @@ interface Group {
 interface Plan {
     savedMenu: MenuItem[] | null;
     groups: Group[];
+    // The addresses of each customer that is deleted.
+    customerAddresses: Map<string, string[]>;
     // Created by the migration, but kept: they have orders that weren't migrated.
-    keptCustomers: { id: string; reason: string }[];
+    keptCustomers: { id: string; reason: string; addressIds: string[] }[];
     // Already in Shopify before the migration: kept, minus the addresses the migration added.
     linkedCustomers: { id: string; addressIds: string[] }[];
-    linkedDefinitions: number;
+    linkedDefinitions: string[];
+    // Set when the migration enabled the related products definition.
+    relatedDefinitionId: string | null;
 }
 
 async function main() {
     try {
-        parseArgs({ options: {} });
-        printPlan(await makePlan());
+        const args = parseArgs({ options: { yes: { type: "boolean", default: false } } });
+        const plan = await makePlan();
+        printPlan(plan, args.values.yes);
+        if (!args.values.yes) return;
+
+        const failed = await rollBack(plan);
+        if (failed > 0) {
+            console.error(
+                `\n${failed} item(s) failed, see above. Fix the cause and run "npm run rollback -- --yes" again: ` +
+                    "what's already rolled back is skipped.",
+            );
+            process.exitCode = 1;
+        } else console.log("\nRollback complete.");
     } catch (error) {
         console.error(error instanceof Error ? error.message : error);
         process.exitCode = 1;
@@ -86,21 +111,24 @@ async function makePlan(): Promise<Plan> {
     // A customer with orders that weren't migrated (e.g. placed after going live) is kept.
     const migratedOrders = new Set(listMappings("order").map((m) => m.shopify_id));
     const customers = groups.find((g) => g.title === "Customers") as Group;
+    const customerAddresses = new Map<string, string[]>();
     const keptCustomers: Plan["keptCustomers"] = [];
     for (const id of customers.ids) {
-        const orders = await getCustomerOrderIds(id);
-        if (!orders) continue;
-        const others = orders.ids.filter((orderId) => !migratedOrders.has(orderId)).length;
-        if (others > 0 || orders.total > orders.ids.length)
+        const customer = await getCustomerOrdersAndAddresses(id);
+        if (!customer) continue;
+        const others = customer.orderIds.filter((orderId) => !migratedOrders.has(orderId)).length;
+        if (others > 0 || customer.totalOrders > customer.orderIds.length)
             keptCustomers.push({
                 id,
                 reason:
                     others > 0
                         ? `has ${others} order(s) that weren't migrated`
-                        : `has ${orders.total} orders, too many to check`,
+                        : `has ${customer.totalOrders} orders, too many to check`,
+                addressIds: customer.addressIds,
             });
+        else customerAddresses.set(id, customer.addressIds);
     }
-    customers.ids = customers.ids.filter((id) => !keptCustomers.some((k) => k.id === id));
+    customers.ids = customers.ids.filter((id) => customerAddresses.has(id));
 
     // The addresses the migration added to customers that already existed.
     const migratedAddresses = new Set([
@@ -108,9 +136,13 @@ async function makePlan(): Promise<Plan> {
         ...listShopifyIds("order_side_effect"),
     ]);
     const linkedCustomers: Plan["linkedCustomers"] = [];
-    for (const id of linkedCustomerIds.filter((id) => existing.has(id))) {
-        const customer = await getShopifyCustomer(id);
-        if (!customer) continue;
+    for (const id of linkedCustomerIds) {
+        const customer = existing.has(id) ? await getShopifyCustomer(id) : null;
+        // Deleted in Shopify since: only unlinked.
+        if (!customer) {
+            customers.gone.push(id);
+            continue;
+        }
         const addressIds = customer.addresses.map((a) => a.id).filter((a) => migratedAddresses.has(a));
         linkedCustomers.push({ id, addressIds });
     }
@@ -119,25 +151,27 @@ async function makePlan(): Promise<Plan> {
     return {
         savedMenu: savedMenu ? (JSON.parse(savedMenu) as MenuItem[]) : null,
         groups,
+        customerAddresses,
         keptCustomers,
         linkedCustomers,
-        linkedDefinitions: ids("attribute", true).length,
+        linkedDefinitions: ids("attribute", true),
+        relatedDefinitionId: relatedDefinition?.id ?? null,
     };
 }
 
-function printPlan(plan: Plan): void {
-    console.log("Rollback check: nothing is changed.\n");
+function printPlan(plan: Plan, yes: boolean): void {
+    console.log(yes ? "Rolling back:\n" : "Rollback check: nothing is changed.\n");
 
     console.log(
         plan.savedMenu
-            ? `Main menu: would be put back to the ${plan.savedMenu.length} item(s) it had before the migration: ` +
-                  `${plan.savedMenu.map((item) => item.title).join(", ") || "(empty)"}.`
+            ? `Main menu: ${yes ? "will" : "would"} be put back to the ${plan.savedMenu.length} item(s) it had before ` +
+                  `the migration: ${plan.savedMenu.map((item) => item.title).join(", ") || "(empty)"}.`
             : "Main menu: no copy from before the migration was saved, so it's left as it is.",
     );
 
     for (const group of plan.groups) {
         const parts = [];
-        if (group.ids.length > 0) parts.push(`${group.ids.length} would be deleted`);
+        if (group.ids.length > 0) parts.push(`${group.ids.length} ${yes ? "to delete" : "would be deleted"}`);
         if (group.gone.length > 0) parts.push(`${group.gone.length} already deleted in Shopify (only removed from the mapping)`);
         console.log(`${group.title}: ${parts.join(", ") || "none"}.`);
         if (group.title === "Customers")
@@ -149,18 +183,104 @@ function printPlan(plan: Plan): void {
         const addresses = plan.linkedCustomers.reduce((sum, c) => sum + c.addressIds.length, 0);
         console.log(
             `Customers that already existed in Shopify: ${plan.linkedCustomers.length} kept, ` +
-                `${addresses} address(es) the migration added would be removed. The migration may have changed ` +
-                "their name, phone, note, tags and email marketing; that isn't undone.",
+                `${addresses} address(es) the migration added ${yes ? "to remove" : "would be removed"}. ` +
+                "The migration may have changed their name, phone, note, tags and email marketing; that isn't undone.",
         );
         for (const { id } of plan.linkedCustomers) console.log(`  ${adminCustomerUrl(id)}`);
     }
-    if (plan.linkedDefinitions > 0)
+    if (plan.linkedDefinitions.length > 0)
         console.log(
-            `Metafield definitions that already existed in Shopify: ${plan.linkedDefinitions} kept ` +
+            `Metafield definitions that already existed in Shopify: ${plan.linkedDefinitions.length} kept ` +
                 "(their values on migrated products go with the products).",
         );
 
-    console.log("\nRolling back isn't built yet; this only shows what it would do.");
+    if (!yes) console.log('\nTo roll back, run "npm run rollback -- --yes".');
+}
+
+// Rolls back in the order of the plan, carrying on after a failure. Returns the number of failures.
+async function rollBack(plan: Plan): Promise<number> {
+    let failed = 0;
+    const attempt = async (what: string, action: () => Promise<void>): Promise<boolean> => {
+        try {
+            await action();
+            return true;
+        } catch (error) {
+            failed++;
+            console.error(`Failed ${what}: ${error instanceof Error ? error.message : error}`);
+            return false;
+        }
+    };
+    console.log("");
+
+    const savedMenu = plan.savedMenu;
+    if (savedMenu)
+        await attempt("to put back the main menu", async () => {
+            const menu = await getMenu(MENU_HANDLE);
+            if (!menu) throw new Error(`Shopify has no menu with the handle "${MENU_HANDLE}".`);
+            await setMenuItems(menu, toMenuInput(savedMenu));
+            forgetState(`menu:${MENU_HANDLE}`);
+            console.log("Main menu put back.");
+        });
+
+    for (const group of plan.groups) {
+        for (const id of group.gone) forgetShopifyId(id);
+        // Addresses of customers that are still in Shopify after this step: their mapping is kept.
+        const remainingAddresses = new Set(plan.keptCustomers.flatMap((c) => c.addressIds));
+        let deleted = 0;
+        for (const id of group.ids) {
+            const ok = await attempt(`to delete ${id}`, async () => {
+                await deleteById(id);
+                forgetShopifyId(id);
+                if (id === plan.relatedDefinitionId) forgetState("related-definition-enabled");
+            });
+            if (ok) deleted++;
+            else for (const addressId of plan.customerAddresses.get(id) ?? []) remainingAddresses.add(addressId);
+        }
+        if (group.ids.length > 0) console.log(`${group.title}: ${deleted} of ${group.ids.length} deleted.`);
+        if (group.title !== "Customers") continue;
+
+        // Once the orders are gone: the addresses the migration added to customers that already existed.
+        for (const { id, addressIds } of plan.linkedCustomers) {
+            let removed = 0;
+            for (const addressId of addressIds) {
+                const ok = await attempt(`to remove address ${addressId} from ${adminCustomerUrl(id)}`, () =>
+                    deleteCustomerAddress(id, addressId),
+                );
+                if (ok) removed++;
+                else remainingAddresses.add(addressId);
+            }
+            // Unlinked once all its migrated addresses are gone (else a rerun tries again).
+            if (removed === addressIds.length) forgetShopifyId(id);
+            console.log(`Kept ${adminCustomerUrl(id)}, removed ${removed} of ${addressIds.length} migrated address(es).`);
+        }
+
+        // Every other migrated address went with its customer (or was deleted by hand).
+        // Left in the mapping, it would stop the customer from being migrated again.
+        const migratedAddresses = [
+            ...listMappings("address").map((m) => m.shopify_id),
+            ...listShopifyIds("order_side_effect").filter((id) => id.includes("/MailingAddress/")),
+        ];
+        for (const addressId of migratedAddresses)
+            if (!remainingAddresses.has(addressId)) forgetShopifyId(addressId);
+    }
+
+    // The migration enabled the related products definition, but it's already gone.
+    if (findState("related-definition-enabled") && !plan.relatedDefinitionId) forgetState("related-definition-enabled");
+    for (const id of plan.linkedDefinitions) forgetShopifyId(id);
+    return failed;
+}
+
+// The saved items as menuUpdate takes them: a plain link keeps its URL; an
+// item that points at a collection, product, … is linked by its resourceId.
+function toMenuInput(items: MenuItem[]): MenuItem[] {
+    return items.map(({ title, type, resourceId, url, tags, items }) => ({
+        title,
+        type,
+        resourceId,
+        url: resourceId ? null : (url ?? null),
+        tags: tags ?? [],
+        items: toMenuInput(items),
+    }));
 }
 
 await main();

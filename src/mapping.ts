@@ -256,3 +256,13 @@ export function listGuestOrderCustomers(): string[] {
         .all() as { shopify_id: string }[];
     return rows.map((row) => row.shopify_id);
 }
+
+// Removes a Shopify ID from every table, once the rollback deleted it (or unlinked it).
+export function forgetShopifyId(shopifyId: string): void {
+    for (const table of ["mapping", "file_mapping", "redirect_mapping", "discount_mapping", "order_side_effect"])
+        getDb().prepare(`DELETE FROM ${table} WHERE shopify_id = ?`).run(shopifyId);
+}
+
+export function forgetState(key: string): void {
+    getDb().prepare("DELETE FROM saved_state WHERE key = ?").run(key);
+}

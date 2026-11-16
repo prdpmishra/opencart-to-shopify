@@ -1397,13 +1397,58 @@ export async function getShopifyCustomer(id: string): Promise<ShopifyCustomer | 
     };
 }
 
-// The customer's order IDs (up to 250) and how many orders they have in all; null if the customer is gone.
-export async function getCustomerOrderIds(id: string): Promise<{ total: number; ids: string[] } | null> {
+// The customer's order IDs (up to 250), how many orders they have in all, and
+// their address IDs; null if the customer is gone.
+export async function getCustomerOrdersAndAddresses(
+    id: string,
+): Promise<{ totalOrders: number; orderIds: string[]; addressIds: string[] } | null> {
     const { customer } = await graphql<{
-        customer: { numberOfOrders: string; orders: { nodes: { id: string }[] } } | null;
-    }>(`query ($id: ID!) { customer(id: $id) { numberOfOrders orders(first: 250) { nodes { id } } } }`, { id });
+        customer: {
+            numberOfOrders: string;
+            orders: { nodes: { id: string }[] };
+            addressesV2: { nodes: { id: string }[] };
+        } | null;
+    }>(
+        `query ($id: ID!) {
+            customer(id: $id) {
+                numberOfOrders
+                orders(first: 250) { nodes { id } }
+                addressesV2(first: 250) { nodes { id } }
+            }
+        }`,
+        { id },
+    );
     if (!customer) return null;
-    return { total: Number(customer.numberOfOrders), ids: customer.orders.nodes.map((o) => o.id) };
+    return {
+        totalOrders: Number(customer.numberOfOrders),
+        orderIds: customer.orders.nodes.map((o) => o.id),
+        addressIds: customer.addressesV2.nodes.map((a) => a.id),
+    };
+}
+
+// Delete mutations by the type in the ID (gid://shopify/<type>/123), for the rollback.
+const DELETE_MUTATIONS: Record<string, string> = {
+    Order: "orderDelete(orderId: $id)",
+    Customer: "customerDelete(input: { id: $id })",
+    DiscountAutomaticNode: "discountAutomaticDelete(id: $id)",
+    UrlRedirect: "urlRedirectDelete(id: $id)",
+    Product: "productDelete(input: { id: $id })",
+    Collection: "collectionDelete(input: { id: $id })",
+    // Also deletes the values on products that still exist.
+    MetafieldDefinition: "metafieldDefinitionDelete(id: $id, deleteAllAssociatedMetafields: true)",
+    MediaImage: "fileDelete(fileIds: [$id])",
+    GenericFile: "fileDelete(fileIds: [$id])",
+};
+
+export async function deleteById(id: string): Promise<void> {
+    const type = id.split("/")[3] ?? "";
+    const call = DELETE_MUTATIONS[type];
+    if (!call) throw new Error(`Don't know how to delete ${id}.`);
+    const { result } = await graphql<{ result: UserErrorsResult }>(
+        `mutation ($id: ID!) { result: ${call} { userErrors { field message } } }`,
+        { id },
+    );
+    throwUserErrors(`Shopify didn't delete ${id}`, result.userErrors);
 }
 
 // What Shopify saved; the province code shows whether Shopify kept the one we sent.
