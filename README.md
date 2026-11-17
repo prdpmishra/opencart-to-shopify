@@ -1,6 +1,14 @@
 # OpenCart to Shopify
 
-Migrates products, customers and order history from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
+A command-line tool in TypeScript that moves an OpenCart 3.0 shop to Shopify: products, customers and order history, through Shopify's Admin GraphQL API.
+
+- **Products** with variants from options, stock per variant, prices and sale prices, images, categories as collections, attributes as metafields, quantity discounts and related products
+- **Customers** with addresses, phone numbers in international format and newsletter consent; **orders** as history, with totals that match what was paid to the cent and no emails to customers
+- **SEO kept:** old OpenCart URLs redirect to the new Shopify pages, and the category menu becomes the store's main menu
+- **Safe to run and re-run:** a dry run for every command, resumable runs, and a rollback that removes only what the migration created
+- **Tested** with 141 unit tests and on an anonymised copy of a real shop: all 19,334 products checked in a dry run, and 670 customers and 1,052 orders migrated to a development store, every order total matching OpenCart
+
+Why it works the way it does: [Design decisions](docs/DESIGN-DECISIONS.md). I built this tool with AI coding assistants (Claude Code), leading the requirements, design decisions, code review and testing myself.
 
 **New here? Start with the [Getting started guide](docs/GETTING-STARTED.md)**: it walks through installing the tool, creating the Shopify app, filling in the settings, a test migration on a development store, and the real migration, with troubleshooting. This README is the reference for what each command does with the data.
 
@@ -307,6 +315,7 @@ src/
   *.test.ts    Unit tests (npm test)
 docs/
   GETTING-STARTED.md  Step-by-step guide from download to finished migration
+  DESIGN-DECISIONS.md Why the tool works the way it does
 scripts/
   anonymise.sql  Replaces personal data in a copy of the OpenCart database
 ```
