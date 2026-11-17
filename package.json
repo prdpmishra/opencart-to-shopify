@@ -1,8 +1,16 @@
 {
     "name": "opencart-to-shopify",
     "version": "1.0.0",
+    "private": true,
     "type": "module",
-    "description": "",
+    "description": "Migrates products, customers and order history from OpenCart 3.0 to Shopify through the Admin GraphQL API",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/prdpmishra/opencart-to-shopify.git"
+    },
+    "engines": {
+        "node": ">=22.13"
+    },
     "main": "src/index.ts",
     "scripts": {
         "test": "tsx --test \"src/**/*.test.ts\"",
@@ -15,8 +23,8 @@
         "related": "tsx --env-file=.env src/related.ts",
         "rollback": "tsx --env-file=.env src/rollback.ts"
     },
-    "keywords": [],
-    "author": "",
+    "keywords": ["opencart", "shopify", "migration", "ecommerce"],
+    "author": "Pradeep Mishra",
     "license": "ISC",
     "dependencies": {
         "he": "^2.0.0",

@@ -2,6 +2,8 @@
 
 Migrates products, customers and order history from an OpenCart 3.0 database to a Shopify store through the Admin GraphQL API.
 
+**New here? Start with the [Getting started guide](docs/GETTING-STARTED.md)**: it walks through installing the tool, creating the Shopify app, filling in the settings, a test migration on a development store, and the real migration, with troubleshooting. This README is the reference for what each command does with the data.
+
 Products are migrated one at a time or all at once, with their details, images, variants and stock: title, description, handle, price, SKU, the main image, the additional images, select/radio options as variants, quantities, categories as collections, attributes as metafields, quantity discounts, related products, status, SEO, vendor, tags, weight, and URL redirects from the old OpenCart URLs. Enabled products become active and are published to the Online Store; disabled ones become drafts. Customers are migrated with their addresses, phone number and newsletter consent (see [Customers](#customers-npm-run-customers)), and orders as history (see [Orders](#orders-npm-run-orders)). Everything the migration created can be undone with a [rollback](#rollback-npm-run-rollback).
 
 > [!CAUTION]
@@ -303,6 +305,12 @@ src/
   mapping.ts   SQLite mapping of migrated products, categories, attributes, customers, addresses, orders, files, redirects and discounts
   redirects.ts Old OpenCart URLs → Shopify URL redirects
   *.test.ts    Unit tests (npm test)
+docs/
+  GETTING-STARTED.md  Step-by-step guide from download to finished migration
 scripts/
   anonymise.sql  Replaces personal data in a copy of the OpenCart database
 ```
+
+## License
+
+[ISC](LICENSE). The tool is provided as is, without warranty: test on a development store first and keep backups (see [Getting started](docs/GETTING-STARTED.md)).

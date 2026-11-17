@@ -2,3 +2,7 @@ node_modules/
 .env
 .env.practice
 migration*.sqlite
+migration*.sqlite-journal
+migration*.sqlite-wal
+migration*.sqlite-shm
+*.log

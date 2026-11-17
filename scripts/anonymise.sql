@@ -9,13 +9,13 @@
 -- shared phone numbers stay shared. A phone keeps its format and first three
 -- digits, so it still parses as a number of the same country.
 --
--- Usage, from the XAMPP mysql\bin folder (only ever on a copy):
---   mysql -u root -e "CREATE DATABASE oc_shopify_anon CHARACTER SET utf8mb4"
---   mysqldump -u root oc_shopify | mysql -u root oc_shopify_anon
---   mysql -u root oc_shopify_anon < scripts/anonymise.sql
+-- Usage (only ever on a copy):
+--   mysql -u root -e "CREATE DATABASE opencart_anon CHARACTER SET utf8mb4"
+--   mysqldump -u root opencart | mysql -u root opencart_anon
+--   mysql -u root opencart_anon < scripts/anonymise.sql
 --
--- Written for tables without a prefix (as in oc_shopify): add the prefix to
--- the table names if the copy has one.
+-- Written for tables without a prefix: add the prefix to the table names if
+-- the copy has one.
 
 -- Refuses to run on a database whose name doesn't end in "_anon".
 DROP PROCEDURE IF EXISTS anon_check_database;
